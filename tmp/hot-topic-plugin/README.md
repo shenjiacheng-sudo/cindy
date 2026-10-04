@@ -69,3 +69,7 @@ node --check tmp/hot-topic-plugin/node/crawler-adapter.cjs
 ## 1.7.0 可调点赞与粉丝门槛
 
 面板新增“关键词最低命中数”，可设置为 1–3，默认 1；同时可调最低点赞数和最低博主粉丝量。视频标题或正文必须命中设置数量的不同关键词；设置为 2 或 3 时，档案必须填写至少同样数量的关键词。
+
+## 1.9.2 MediaCrawler 版本兼容检查
+
+启动采集前读取 MediaCrawler 的 pyproject.toml 版本，并检查抖音、快手官方搜索流程所需的公开源码标记。版本或源码结构不匹配时返回 COLLECTOR_VERSION_UNSUPPORTED，不启动采集。官方搜索响应全部为空时返回 COLLECTOR_ENDPOINT_INCOMPATIBLE；进程结束但没有写出结果文件时返回 COLLECTOR_NO_DATA，不再把这些情况当作正常的“0 条结果”。

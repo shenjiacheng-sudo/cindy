@@ -12,6 +12,9 @@ const MAX_SOURCE_ARCHIVE_BYTES = 128 * 1024 * 1024;
 const MAX_RESULT_ROWS = 500;
 const MAX_RUNTIME_MS = 12 * 60 * 1000;
 const LOGIN_TIMEOUT_MS = 90 * 1000;
+const COLLECT_RETRY_LIMIT = 2;
+const COLLECT_RETRY_MIN_MS = 1500;
+const COLLECT_RETRY_MAX_MS = 4500;
 const SUPPORTED_PLATFORMS = new Set(['douyin', 'kuaishou']);
 const ACTIVE_CHILDREN = new Set();
 const ACTIVE_RUNS = new Set();
@@ -122,6 +125,7 @@ function validateMediaCrawlerRoot(crawlerRoot) {
   if (!licenseText.includes('NON-COMMERCIAL LEARNING LICENSE')) {
     throw collectorError('LICENSE_MISMATCH', '所选采集器的许可证与本机个人学习试用范围不匹配。');
   }
+  const compatibility = checkMediaCrawlerCompatibility(root);
   const pythonPath = path.join(root, '.venv', 'bin', 'python');
   if (!fs.existsSync(pythonPath) || !fs.statSync(pythonPath).isFile()) {
     throw collectorError('PYTHON_ENV_MISSING', '没有找到已有的 MediaCrawler Python 环境；本插件不会自动安装依赖。');
@@ -140,7 +144,30 @@ function validateMediaCrawlerRoot(crawlerRoot) {
   });
   if (!chromePath) throw collectorError('BROWSER_MISSING', '没有找到已安装的 Chrome；插件不会自动下载浏览器。');
 
-  return { root, pythonPath, chromePath };
+  return { root, pythonPath, chromePath, version: compatibility.version };
+}
+
+function checkMediaCrawlerCompatibility(root) {
+  let manifest;
+  try { manifest = fs.readFileSync(path.join(root, 'pyproject.toml'), 'utf8'); }
+  catch { throw collectorError('COLLECTOR_VERSION_UNSUPPORTED', '无法读取 MediaCrawler 的 pyproject.toml，无法确认兼容版本。'); }
+  const versionMatch = manifest.match(/^version\s*=\s*["']([^"']+)["']/m);
+  const version = versionMatch ? versionMatch[1].slice(0, 80) : 'unknown';
+  const missing = [];
+  for (const platform of ['douyin', 'kuaishou']) {
+    const file = path.join(root, 'media_platform', platform, 'core.py');
+    let source = '';
+    try { source = fs.readFileSync(file, 'utf8'); } catch { missing.push(platform + '/core.py'); continue; }
+    if (!source.includes('config.CRAWLER_MAX_NOTES_COUNT')) missing.push(platform + ':CRAWLER_MAX_NOTES_COUNT');
+    if (!source.includes('await self.search()')) missing.push(platform + ':search');
+  }
+  if (missing.length) {
+    throw collectorError(
+      'COLLECTOR_VERSION_UNSUPPORTED',
+      'MediaCrawler 版本 ' + version + ' 与当前适配不兼容；缺少 ' + missing.join('、') + '。请使用已验证的 MediaCrawler 版本。',
+    );
+  }
+  return { version };
 }
 
 function buildCrawlerArgs({ platform, keywords, outputDir, maxItems = 10 }) {
@@ -286,13 +313,25 @@ function childIsRunning(child) {
   return Boolean(child && child.exitCode === null && child.signalCode === null);
 }
 
-function safeProcessMessage(value) {
-  return String(value || '')
+function retryDelayMs() {
+  return COLLECT_RETRY_MIN_MS + Math.floor(Math.random() * (COLLECT_RETRY_MAX_MS - COLLECT_RETRY_MIN_MS + 1));
+}
+
+function safeProcessMessage(value, priorityLines = []) {
+  const sanitize = (input) => String(input || '')
     .replace(/https?:\/\/[^\s]+/gi, '[url]')
     .replace(/\/Users\/[^\s]+/g, '[path]')
     .replace(/\b(?:cookie|token|authorization|password|secret|session)\b[^\n]*/gi, '[redacted]')
-    .replace(/(?:^|\s)(?:--?w*(?:cookie|token|password|secret)[^\s=]*)(?:=|\s+)\S+/gi, ' [redacted]')
-    .slice(-1200);
+    .replace(/(?:^|\s)(?:--?w*(?:cookie|token|password|secret)[^\s=]*)(?:=|\s+)\S+/gi, ' [redacted]');
+  const sanitized = sanitize(value);
+  const lines = sanitized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const important = [...priorityLines, ...lines.filter((line) =>
+    /CINDY_(?:HTTP|PAGE)_DIAG|Traceback|\b(?:Error|Exception)\b|is empty,None|aweme_list/i.test(line))]
+    .map((line) => sanitize(line).trim()).filter(Boolean);
+  const uniqueImportant = [...new Set(important)];
+  const remainder = lines.filter((line) => !uniqueImportant.includes(line));
+  // Keep compact API diagnostics first so later crawler chatter cannot evict status_msg.
+  return [...uniqueImportant, ...remainder].join('\n').slice(0, 6000);
 }
 
 function runChild(command, args, options, signal, onSpawn, timeoutMs = MAX_RUNTIME_MS) {
@@ -302,14 +341,50 @@ function runChild(command, args, options, signal, onSpawn, timeoutMs = MAX_RUNTI
     let stopping = false;
     let timedOut = false;
     let stderr = '';
+    let stderrScanBuffer = '';
+    const priorityStderrLines = [];
+    const paginationDiagnostics = [];
     let stdout = '';
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       signal.removeEventListener('abort', onAbort);
+      if (error && paginationDiagnostics.length && !error.paginationDiagnostics) {
+        error.paginationDiagnostics = paginationDiagnostics.slice(0, 100);
+      }
       if (error) reject(error);
       else resolve(value);
+    };
+    const scanStderrLine = (line) => {
+      if (line.startsWith('CINDY_PAGE_DIAG ')) {
+        try {
+          const parsed = JSON.parse(line.slice('CINDY_PAGE_DIAG '.length));
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && paginationDiagnostics.length < 100) {
+            const record = {
+              phase: options.env && options.env.CINDY_SEARCH_PHASE === 'login' ? 'login' : 'collect',
+              keywordIndex: Number.isInteger(parsed.keywordIndex) && parsed.keywordIndex >= 1 && parsed.keywordIndex <= MAX_KEYWORDS ? parsed.keywordIndex : null,
+              requestCursor: typeof parsed.requestCursor === 'string' ? parsed.requestCursor.slice(0, 80) : null,
+              responseCursor: typeof parsed.responseCursor === 'string' ? parsed.responseCursor.slice(0, 80) : null,
+              hasMore: typeof parsed.hasMore === 'boolean' ? parsed.hasMore : null,
+              apiCode: typeof parsed.apiCode === 'string' ? parsed.apiCode.slice(0, 40) : null,
+              dataCount: Number.isInteger(parsed.dataCount) && parsed.dataCount >= 0 ? Math.min(parsed.dataCount, 100000) : null,
+              httpStatus: Number.isInteger(parsed.httpStatus) ? parsed.httpStatus : (parsed.httpStatus === 'exception' ? 'exception' : null),
+              transport: ['httpx', 'aiohttp'].includes(parsed.transport) ? parsed.transport : null,
+              path: typeof parsed.path === 'string' ? parsed.path.slice(0, 160) : null,
+              queryKeys: Array.isArray(parsed.queryKeys) ? parsed.queryKeys.filter((v) => typeof v === 'string').slice(0, 40) : [],
+              bodyKeys: Array.isArray(parsed.bodyKeys) ? parsed.bodyKeys.filter((v) => typeof v === 'string').slice(0, 40) : [],
+            };
+            if (typeof parsed.keyword === 'string') record.keyword = parsed.keyword.slice(0, 60);
+            if (typeof parsed.responseError === 'string') record.responseError = parsed.responseError.slice(0, 80);
+            paginationDiagnostics.push(record);
+          }
+        } catch { /* Ignore malformed metadata; never retain raw request or response data. */ }
+      }
+      if (/CINDY_HTTP_DIAG|CINDY_PAGE_DIAG|Traceback|\b(?:Error|Exception)\b|is empty,None|aweme_list/i.test(line)) {
+        priorityStderrLines.push(line);
+        if (priorityStderrLines.length > 130) priorityStderrLines.shift();
+      }
     };
     const stop = async (reason) => {
       if (stopping || settled) return;
@@ -354,7 +429,12 @@ function runChild(command, args, options, signal, onSpawn, timeoutMs = MAX_RUNTI
         finish(collectorError('COLLECTOR_START_FAILED', '无法启动本机采集环境；请检查 Python 环境与权限。'));
       });
       if (child.stderr) child.stderr.on('data', (chunk) => {
-        stderr = (stderr + chunk.toString('utf8')).slice(-2400);
+        const text = chunk.toString('utf8');
+        stderr = (stderr + text).slice(-12000);
+        stderrScanBuffer += text;
+        const completeLines = stderrScanBuffer.split(/\r?\n/);
+        stderrScanBuffer = completeLines.pop() || '';
+        for (const line of completeLines) scanStderrLine(line);
       });
       if (child.stdout) child.stdout.on('data', (chunk) => {
         stdout = (stdout + chunk.toString('utf8')).slice(-2400);
@@ -362,15 +442,17 @@ function runChild(command, args, options, signal, onSpawn, timeoutMs = MAX_RUNTI
       child.once('exit', (code, signalName) => {
         ACTIVE_CHILDREN.delete(child);
         if (settled || stopping) return;
+        if (stderrScanBuffer) scanStderrLine(stderrScanBuffer);
         if (code === 0) finish(null, {
           code,
           signal: signalName,
           stdout: safeProcessMessage(stdout),
-          stderr: safeProcessMessage(stderr),
+          stderr: safeProcessMessage(stderr, [...priorityStderrLines, stderrScanBuffer]),
+          paginationDiagnostics,
         });
         else finish(collectorError(
           timedOut ? 'COLLECTOR_TIMEOUT' : 'COLLECTOR_EXITED',
-          safeProcessMessage(stderr) || '本机采集未正常完成；请检查独立浏览器登录页面后重试。',
+          safeProcessMessage(stderr, [...priorityStderrLines, stderrScanBuffer]) || '本机采集未正常完成；请检查独立浏览器登录页面后重试。',
         ));
       });
     } catch {
@@ -515,6 +597,17 @@ function parseSearchJsonl(outputRoot, platform, maxItems = 10) {
   return rows;
 }
 
+function summarizeEmptyResponses(paginationDiagnostics) {
+  const rows = Array.isArray(paginationDiagnostics) ? paginationDiagnostics : [];
+  const empty = rows.filter((row) => row && row.dataCount === 0 && row.hasMore === false);
+  return {
+    count: empty.length,
+    keywords: [...new Set(empty.map((row) => typeof row.keyword === 'string' ? row.keyword : '').filter(Boolean))].slice(0, 10),
+    paths: [...new Set(empty.map((row) => typeof row.path === 'string' ? row.path : '').filter(Boolean))].slice(0, 10),
+    allPagesEmpty: rows.length > 0 && rows.every((row) => row && row.dataCount === 0),
+  };
+}
+
 function browserPidFiles(sourceRoot) {
   const files = [];
   const queue = [{ dir: path.join(sourceRoot, 'browser_data'), depth: 0 }];
@@ -574,7 +667,126 @@ function abortAll() {
   }
 }
 
-async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 500, signal, onProgress, shouldStop = () => false } = {}) {
+function installSearchResponseDiagnostics(sourceRoot) {
+  const script = [
+    '"""Safe temporary diagnostics for Douyin search response metadata."""',
+    'import json as _json',
+    'import hashlib as _hashlib',
+    'import os as _os',
+    'import re as _re',
+    'import sys as _sys',
+    'from urllib.parse import parse_qs as _parse_qs, urlsplit as _urlsplit',
+    '_keywords = _json.loads(_os.environ.get("CINDY_SEARCH_KEYWORDS", "[]"))',
+    'def _cursor(_value):',
+    '    if _value is None: return None',
+    '    if isinstance(_value, bool): return str(int(_value))',
+    '    if isinstance(_value, (int, float)) and _value == int(_value): return str(int(_value))[:80]',
+    '    _text = str(_value).strip()',
+    '    if not _text: return None',
+    '    if _re.fullmatch(r"-?\\d{1,20}", _text): return _text',
+    '    return "sha256:" + _hashlib.sha256(_text.encode("utf-8", "replace")).hexdigest()[:12]',
+    'def _request_meta(_url, _request=None, _request_body=None):',
+    '    _values = {}',
+    '    try:',
+    '        for _key, _items in _parse_qs(_urlsplit(str(_url)).query, keep_blank_values=True).items():',
+    '            if _items: _values[_key] = _items[-1]',
+    '    except Exception: pass',
+    '    if _request is not None:',
+    '        try: _request_body = _request.content',
+    '        except Exception: pass',
+    '    if isinstance(_request_body, (bytes, bytearray)): _request_body = bytes(_request_body).decode("utf-8", "replace")',
+    '    if isinstance(_request_body, str):',
+    '        try: _request_body = _json.loads(_request_body)',
+    '        except Exception: _request_body = None',
+    '    if isinstance(_request_body, dict):',
+    '        for _key, _value in _request_body.items():',
+    '            if isinstance(_value, (str, int, float, bool)) and _key not in _values: _values[_key] = _value',
+    '    _keyword = next((_values.get(_key) for _key in ("keyword", "search_keyword", "searchKeyword", "q") if isinstance(_values.get(_key), str) and _values.get(_key).strip()), None)',
+    '    _cursor_value = next((_values.get(_key) for _key in ("cursor", "max_cursor", "search_cursor", "offset") if _values.get(_key) is not None), None)',
+    '    return _keyword, _cursor(_cursor_value)',
+    'def _emit(_transport, _url, _status, _headers, _body=None, _error=None, _request=None, _request_body=None):',
+    '    try:',
+    '        _host = getattr(_url, "host", "") or ""',
+    '        _path = getattr(_url, "path", "") or ""',
+    '        if "douyin" not in _host.lower() and "aweme" not in _path.lower(): return',
+    '        if "search" not in _path.lower(): return',
+    '        _info = {"transport": _transport, "host": _host[:100], "path": _path[:160], "httpStatus": _status, "contentType": str(_headers.get("content-type", ""))[:80]}',
+    '        if _error: _info["responseError"] = _error[:80]',
+    '        _keyword, _request_cursor = _request_meta(_url, _request, _request_body)',
+    '        _keyword_index = next((i + 1 for i, _item in enumerate(_keywords[:3]) if isinstance(_item, str) and _item.strip().casefold() == str(_keyword or "").strip().casefold()), None)',
+    '        if _keyword_index is None and len(_keywords) == 1: _keyword_index = 1',
+    '        _page = {"transport": _transport, "keywordIndex": _keyword_index, "requestCursor": _request_cursor, "responseCursor": None, "hasMore": None, "apiCode": None, "dataCount": None, "httpStatus": _status if isinstance(_status, int) else "exception", "path": _path[:160], "queryKeys": sorted(_parse_qs(_urlsplit(str(_url)).query, keep_blank_values=True).keys())[:40], "bodyKeys": []}',
+    '        if _keyword_index and len(_keywords) >= _keyword_index: _page["keyword"] = str(_keywords[_keyword_index - 1])[:60]',
+    '        if _error: _page["responseError"] = _error[:80]',
+    '        if _body is not None:',
+    '            try:',
+    '                _obj = _json.loads(_body.decode("utf-8", "replace"))',
+    '                if isinstance(_obj, dict):',
+    '                    _info["topLevelKeys"] = sorted(str(_k)[:40] for _k in _obj.keys())[:20]',
+    '                    for _key in ("status_code", "statusCode", "code", "error_code"):',
+    '                        if isinstance(_obj.get(_key), (int, float, str)): _info["apiCode"] = str(_obj[_key])[:60]; break',
+    '                    if _info.get("apiCode") is not None: _page["apiCode"] = _info["apiCode"][:40]',
+    '                    for _key in ("status_msg", "message", "msg"):',
+    '                        if isinstance(_obj.get(_key), str):',
+    '                            _message = _obj[_key][:160].replace("\\n", " ")',
+    '                            _info["apiMessage"] = _message',
+    '                            if _info.get("apiCode") == "2483" and "请先登录" in _message and _os.environ.get("CINDY_SEARCH_PHASE") == "collect":',
+    '                                _status_file = _os.environ.get("CINDY_SEARCH_STATUS")',
+    '                                if _status_file:',
+    '                                    with open(_status_file, "w", encoding="utf-8") as _status_stream: _status_stream.write("login-required")',
+    '                            break',
+    '                    _data = _obj.get("data")',
+    '                    _info["dataType"] = type(_data).__name__',
+    '                    _items = _data if isinstance(_data, list) else next((_data.get(_key) for _key in ("data", "items", "aweme_list", "list") if isinstance(_data, dict) and isinstance(_data.get(_key), list)), None)',
+    '                    if isinstance(_items, list): _info["dataCount"] = len(_items); _page["dataCount"] = len(_items)',
+    '                    elif isinstance(_data, dict): _info["dataKeys"] = sorted(str(_k)[:40] for _k in _data.keys())[:20]',
+    '                    _cursor_source = _obj if isinstance(_obj, dict) else {}',
+    '                    _nested = _data if isinstance(_data, dict) else {}',
+    '                    _raw_cursor = next((_source.get(_key) for _source in (_cursor_source, _nested) for _key in ("cursor", "max_cursor", "search_cursor", "next_cursor", "nextCursor") if _source.get(_key) is not None), None)',
+    '                    _page["responseCursor"] = _cursor(_raw_cursor)',
+    '                    _raw_more = next((_source.get(_key) for _source in (_cursor_source, _nested) for _key in ("has_more", "hasMore", "has_next", "hasNext") if _source.get(_key) is not None), None)',
+    '                    if isinstance(_raw_more, bool): _page["hasMore"] = _raw_more',
+    '                    elif isinstance(_raw_more, (int, float)): _page["hasMore"] = bool(_raw_more)',
+    '                    elif isinstance(_raw_more, str) and _raw_more.strip().lower() in ("0", "1", "true", "false"): _page["hasMore"] = _raw_more.strip().lower() in ("1", "true")',
+    '                else: _info["jsonType"] = type(_obj).__name__',
+    '            except Exception: _info["bodyKind"] = "non-json"',
+    '        print("CINDY_HTTP_DIAG " + _json.dumps(_info, ensure_ascii=False), file=_sys.stderr, flush=True)',
+    '        print("CINDY_PAGE_DIAG " + _json.dumps(_page, ensure_ascii=False), file=_sys.stderr, flush=True)',
+    '    except Exception: pass',
+    'try:',
+    '    import httpx as _httpx',
+    '    _httpx_send = _httpx.AsyncClient.send',
+    '    async def _diag_httpx_send(self, request, *args, **kwargs):',
+    '        try:',
+    '            _response = await _httpx_send(self, request, *args, **kwargs)',
+    '            _body = await _response.aread()',
+    '            _emit("httpx", _response.request.url, _response.status_code, _response.headers, _body, _request=request)',
+    '            return _response',
+    '        except Exception as _exc:',
+    '            _emit("httpx", request.url, "exception", {}, _error=type(_exc).__name__, _request=request)',
+    '            raise',
+    '    _httpx.AsyncClient.send = _diag_httpx_send',
+    'except Exception: pass',
+    'try:',
+    '    import aiohttp as _aiohttp',
+    '    _aiohttp_request = _aiohttp.ClientSession._request',
+    '    async def _diag_aiohttp_request(self, method, str_or_url, *args, **kwargs):',
+    '        try:',
+    '            _response = await _aiohttp_request(self, method, str_or_url, *args, **kwargs)',
+    '            _url = getattr(_response, "url", str_or_url)',
+    '            _body = await _response.read()',
+    '            _emit("aiohttp", _url, _response.status, _response.headers, _body, _request_body=kwargs.get("json", kwargs.get("data")))',
+    '            return _response',
+    '        except Exception as _exc:',
+    '            _emit("aiohttp", str_or_url, "exception", {}, _error=type(_exc).__name__, _request_body=kwargs.get("json", kwargs.get("data")))',
+    '            raise',
+    '    _aiohttp.ClientSession._request = _diag_aiohttp_request',
+    'except Exception: pass',
+  ].join('\n');
+  fs.writeFileSync(path.join(sourceRoot, 'sitecustomize.py'), script, { mode: 0o600 });
+}
+
+async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 500, signal, onProgress, shouldStop = () => false, freshAccount = false } = {}) {
   const safePlatform = SUPPORTED_PLATFORMS.has(platform) ? platform : null;
   if (!safePlatform) throw collectorError('UNSUPPORTED_PLATFORM', '本机试用版仅支持抖音或快手。');
   if (!signal || typeof signal.addEventListener !== 'function') {
@@ -593,6 +805,7 @@ async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 
   let session;
   let monitor;
   const phaseDiagnostics = [];
+  const phaseAttempts = new Map();
   let endReason = 'search-ended';
   const deadline = Date.now() + MAX_RUNTIME_MS;
 
@@ -604,8 +817,15 @@ async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 
     await archiveHead(environment.root, sourceRoot, signal);
     patchSearchLimits(sourceRoot);
     patchSearchFlow(sourceRoot);
+    installSearchResponseDiagnostics(sourceRoot);
     try {
-      session = await browserSession.openSession({ chromePath: environment.chromePath, platform: safePlatform, signal });
+      session = await browserSession.openSession({
+        chromePath: environment.chromePath,
+        platform: safePlatform,
+        signal,
+        headless: !freshAccount,
+        scope: freshAccount ? `${__dirname}:fresh-account` : __dirname,
+      });
     } catch (error) {
       throw collectorError(error.code || "BROWSER_START_FAILED", error.code ? error.message : "专用浏览器启动失败，请检查 Chrome。");
     }
@@ -623,35 +843,89 @@ async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 
       TMPDIR: os.tmpdir(),
       NO_PROXY: 'localhost,127.0.0.1,::1',
       no_proxy: 'localhost,127.0.0.1,::1',
+      PYTHONPATH: sourceRoot,
+      CINDY_SEARCH_KEYWORDS: JSON.stringify(keywords),
       LANG: process.env.LANG || 'en_US.UTF-8',
     };
     const controlRoot = path.join(tempRoot, 'control');
     fs.mkdirSync(controlRoot, { mode: 0o700 });
     const statusFile = path.join(controlRoot, 'status');
+    const loginDiagnosticFile = path.join(controlRoot, 'login-probe.json');
+    const webDiagnosticFile = path.join(controlRoot, 'web-probe.json');
     monitor = createDecisionMonitor({ controlRoot, shouldStop,
       readVideos: () => parseSearchJsonl(outputRoot, safePlatform, maxItems) });
     try {
       await runPhases({ session, signal, onSession: (current) => { session = current; },
         run: async (phase, current) => {
+          const attempt = (phaseAttempts.get(phase) || 0) + 1;
+          phaseAttempts.set(phase, attempt);
+          if (phase === 'collect' && attempt > 1) {
+            await delay(retryDelayMs(), undefined, { signal });
+            fs.rmSync(outputRoot, { recursive: true, force: true });
+            fs.mkdirSync(outputRoot, { recursive: true, mode: 0o700 });
+          }
           fs.rmSync(statusFile, { force: true });
           if (Date.now() >= deadline) throw collectorError('COLLECTOR_TIMEOUT', '本次搜索已达到时间上限。');
-          const processResult = await runChild(environment.pythonPath, args, {
-            cwd: sourceRoot,
-            env: { ...env, CINDY_SEARCH_PHASE: phase, CINDY_SEARCH_STATUS: statusFile,
-              CINDY_SEARCH_CONTROL: controlRoot, CINDY_BROWSER_WS: current.wsUrl,
-              CINDY_BROWSER_PORT: String(current.port) },
-            stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, detached: true,
-          }, signal, (child) => { activeRun.child = child; }, Math.min(
-            deadline - Date.now(),
-            phase === 'login' ? LOGIN_TIMEOUT_MS : MAX_RUNTIME_MS,
-          ));
+          let processResult;
+          try {
+            processResult = await runChild(environment.pythonPath, args, {
+              cwd: sourceRoot,
+              env: { ...env, CINDY_SEARCH_PHASE: phase, CINDY_SEARCH_STATUS: statusFile,
+                CINDY_SEARCH_CONTROL: controlRoot, CINDY_BROWSER_WS: current.wsUrl,
+                CINDY_BROWSER_PORT: String(current.port), CINDY_LOGIN_DIAGNOSTIC: loginDiagnosticFile,
+                CINDY_FRESH_ACCOUNT: freshAccount ? 'true' : 'false', CINDY_WEB_PROBE: freshAccount ? 'true' : 'false',
+                CINDY_WEB_DIAGNOSTIC: webDiagnosticFile },
+              stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, detached: true,
+            }, signal, (child) => { activeRun.child = child; }, Math.min(
+              deadline - Date.now(),
+              phase === 'login' ? LOGIN_TIMEOUT_MS : MAX_RUNTIME_MS,
+            ));
+          } catch (error) {
+            if (Array.isArray(error.paginationDiagnostics)) phaseDiagnostics.push({ phase, paginationDiagnostics: error.paginationDiagnostics });
+            throw error;
+          }
           const phaseStatus = fs.existsSync(statusFile) ? fs.readFileSync(statusFile, 'utf8').trim() : 'missing';
-          phaseDiagnostics.push({ phase, ...processResult, phaseStatus });
+          let loginDiagnostics = null;
+          if (fs.existsSync(loginDiagnosticFile)) {
+            try {
+              const probe = JSON.parse(fs.readFileSync(loginDiagnosticFile, 'utf8'));
+              if (probe && typeof probe === 'object' && !Array.isArray(probe)) {
+                loginDiagnostics = {
+                  cookieCount: Number.isInteger(probe.cookieCount) && probe.cookieCount >= 0 ? Math.min(probe.cookieCount, 1000) : null,
+                  hasLikelyLoginCookie: typeof probe.hasLikelyLoginCookie === 'boolean' ? probe.hasLikelyLoginCookie : null,
+                  probeError: typeof probe.probeError === 'string' ? probe.probeError.slice(0, 80) : null,
+                };
+              }
+            } catch { loginDiagnostics = { cookieCount: null, hasLikelyLoginCookie: null, probeError: 'invalid-probe' }; }
+          }
+          let webDiagnostics = null;
+          if (fs.existsSync(webDiagnosticFile)) {
+            try {
+              const probe = JSON.parse(fs.readFileSync(webDiagnosticFile, 'utf8'));
+              if (Array.isArray(probe)) webDiagnostics = probe.slice(0, 200);
+              else if (probe && typeof probe === 'object') webDiagnostics = {
+                error: typeof probe.error === 'string' ? probe.error.slice(0, 80) : null,
+                events: Array.isArray(probe.events) ? probe.events.slice(0, 200) : [],
+              };
+            } catch { webDiagnostics = { error: 'invalid-probe', events: [] }; }
+          }
+          phaseDiagnostics.push({ phase, attempt, ...processResult, phaseStatus, loginDiagnostics, webDiagnostics });
           if (phaseStatus !== 'missing') return phaseStatus;
+          if (phase === 'collect' && attempt <= COLLECT_RETRY_LIMIT) {
+            let hasVideos = false;
+            try {
+              const files = findSearchFiles(outputRoot);
+              hasVideos = files.length > 0 && parseSearchJsonl(outputRoot, safePlatform, maxItems).length > 0;
+            } catch { hasVideos = false; }
+            if (!hasVideos) return 'retry-collect';
+          }
           return phase === 'login' ? 'login-failed' : 'complete';
         },
       });
     } catch (error) {
+      if (error && ['LOGIN_INCOMPLETE', 'LOGIN_NOT_RETAINED'].includes(error.code)) {
+        throw collectorError(error.code, error.message);
+      }
       if (error.code !== 'COLLECTOR_TIMEOUT') throw error;
       endReason = 'time-limit';
     }
@@ -663,20 +937,51 @@ async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 
     const dataFiles = outputFiles.length ? [] : findSearchFiles(dataRoot);
     const resultRoot = outputFiles.length ? outputRoot : dataRoot;
     const resultFiles = outputFiles.length ? outputFiles : dataFiles;
-    if (!resultFiles.length) {
-      const details = phaseDiagnostics.map(({ phase, code, signal, phaseStatus, stdout, stderr }) => {
-        const parts = [phase + ':exit=' + code, 'signal=' + (signal || 'none'), 'status=' + phaseStatus];
-        if (stdout) parts.push('stdout=' + stdout);
-        if (stderr) parts.push('stderr=' + stderr);
-        return parts.join('; ');
-      }).join(' | ');
-      throw collectorError('COLLECTOR_NO_DATA', '采集完成但 output/ 和 data/ 都没有搜索结果文件。' + (details ? ' 诊断：' + details : ''));
+    const videos = resultFiles.length ? parseSearchJsonl(resultRoot, safePlatform, maxItems) : [];
+    const paginationDiagnostics = phaseDiagnostics
+      .flatMap((entry) => Array.isArray(entry.paginationDiagnostics) ? entry.paginationDiagnostics : [])
+      .slice(0, 100);
+    const emptyResponseDiagnostics = summarizeEmptyResponses(paginationDiagnostics);
+    if (!videos.length && emptyResponseDiagnostics.count > 0) {
+      const error = collectorError(
+        'COLLECTOR_ENDPOINT_INCOMPATIBLE',
+        '搜索接口返回空响应，未将其当作正常无结果；请更新 MediaCrawler 的抖音请求适配。'
+          + (emptyResponseDiagnostics.paths.length ? ' 当前接口：' + emptyResponseDiagnostics.paths.join(', ') + '。' : ''),
+      );
+      error.paginationDiagnostics = paginationDiagnostics;
+      error.emptyResponseDiagnostics = emptyResponseDiagnostics;
+      throw error;
     }
-    const videos = parseSearchJsonl(resultRoot, safePlatform, maxItems);
+    if (!videos.length && !resultFiles.length) {
+      throw collectorError('COLLECTOR_NO_DATA', '采集进程结束但没有写出可解析结果；请检查 MediaCrawler 版本和登录状态。');
+    }
+    const collectionNote = resultFiles.length
+      ? null
+      : '采集进程结束，但 output/ 和 data/ 都没有搜索结果文件；逐页网络诊断仍已保留。';
     if (monitor.stopped) endReason = 'target-reached';
     else if (videos.length >= maxItems) endReason = 'candidate-limit';
     completed = true;
-    return { videos, platform: safePlatform, fetchedAt: new Date().toISOString(), queryKeywords: keywords, endReason };
+    const loginDiagnostics = phaseDiagnostics
+      .map((entry) => entry.loginDiagnostics)
+      .filter(Boolean)
+      .at(-1) || null;
+    const webDiagnostics = phaseDiagnostics
+      .map((entry) => entry.webDiagnostics)
+      .filter(Boolean)
+      .at(-1) || null;
+    return {
+      videos,
+      platform: safePlatform,
+      collectorVersion: environment.version,
+      fetchedAt: new Date().toISOString(),
+      queryKeywords: keywords,
+      endReason: resultFiles.length ? endReason : 'no-output-files',
+      collectionNote,
+      paginationDiagnostics,
+      emptyResponseDiagnostics,
+      loginDiagnostics,
+      webDiagnostics,
+    };
   } finally {
     if (monitor) monitor.close();
     await stopBrowserForSource(sourceRoot);
@@ -695,11 +1000,14 @@ module.exports = {
   normalizeKeywords,
   validateGitTree,
   validateMediaCrawlerRoot,
+  checkMediaCrawlerCompatibility,
   buildCrawlerArgs,
   patchIsolatedSource,
+  installSearchResponseDiagnostics,
   archiveHead,
   safeJsonRecord,
   parseSearchJsonl,
+  summarizeEmptyResponses,
   collectMediaCrawler,
   abortAll,
 };

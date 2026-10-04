@@ -149,6 +149,7 @@ function profileWithOverrides(overrides) {
   const profile = { ...getActiveProfile(), ...cleanProfile(overrides, true) };
   if (isRecord(overrides) && hasOwn(overrides, 'videos')) profile.videos = cleanVideos(overrides.videos);
   if (isRecord(overrides) && hasOwn(overrides, 'platform')) profile.platform = boundedString(overrides.platform, 24).toLowerCase();
+  if (isRecord(overrides) && hasOwn(overrides, 'freshAccount')) profile.freshAccount = overrides.freshAccount === true;
   return profile;
 }
 

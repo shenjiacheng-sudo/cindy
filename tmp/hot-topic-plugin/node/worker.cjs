@@ -19,11 +19,12 @@ const STOP_WORDS = new Set([
 ]);
 
 class WorkerError extends Error {
-  constructor(code, message, rpcCode) {
+  constructor(code, message, rpcCode, details) {
     super(message);
     this.name = 'WorkerError';
     this.code = code;
     this.rpcCode = rpcCode || -32602;
+    if (details && typeof details === 'object') this.details = details;
   }
 }
 
@@ -448,6 +449,7 @@ async function handleRequestAsync(request) {
           source: 'local-mediacrawler-search', collect: false }, evaluatedAt).total >= target,
         signal: controller.signal,
         onProgress: () => {},
+        freshAccount: params.freshAccount === true,
       });
       if (controller.signal.aborted) throw new WorkerError('COLLECTOR_CANCELLED', '本次采集已取消。');
       const result = rankHotTopics({
@@ -460,12 +462,19 @@ async function handleRequestAsync(request) {
         collect: false,
       }, evaluatedAt);
       result.collectionEndReason = result.shortfall === 0 ? 'target-reached' : (collected.endReason || 'search-ended');
+      if (typeof collected.collectorVersion === 'string') result.collectorVersion = collected.collectorVersion;
       const reasons = {
         'search-ended': '本轮关键词搜索已结束',
         'candidate-limit': '已检查本轮最多 500 条候选',
         'time-limit': '已达到本轮 12 分钟时间上限',
         'collector-error': '平台请求或采集过程未正常完成',
+        'no-output-files': '采集进程结束时没有写出结果文件',
       };
+      if (Array.isArray(collected.paginationDiagnostics)) result.paginationDiagnostics = collected.paginationDiagnostics.slice(0, 100);
+      if (collected.emptyResponseDiagnostics && typeof collected.emptyResponseDiagnostics === 'object') result.emptyResponseDiagnostics = collected.emptyResponseDiagnostics;
+      if (typeof collected.collectionNote === 'string') result.collectionNote = collected.collectionNote;
+      if (collected.loginDiagnostics && typeof collected.loginDiagnostics === 'object') result.loginDiagnostics = collected.loginDiagnostics;
+      if (collected.webDiagnostics) result.webDiagnostics = collected.webDiagnostics;
       result.completionMessage = result.shortfall
         ? '目标 ' + target + ' 条，找到 ' + result.total + ' 条合格视频，还差 ' + result.shortfall + ' 条；'
           + (reasons[result.collectionEndReason] || reasons['search-ended']) + '。未降低筛选要求或用不合格内容补足。'
@@ -473,7 +482,18 @@ async function handleRequestAsync(request) {
       return result;
     } catch (error) {
       if (error instanceof collector.CollectorError) {
-        throw new WorkerError(error.code, error.message, -32000);
+        const paginationDiagnostics = Array.isArray(error.paginationDiagnostics)
+          ? error.paginationDiagnostics.slice(0, 100)
+          : [];
+        const details = paginationDiagnostics.length ? { paginationDiagnostics } : undefined;
+        if (error.emptyResponseDiagnostics) {
+          if (details) details.emptyResponseDiagnostics = error.emptyResponseDiagnostics;
+          else throw new WorkerError(error.code, error.message, -32000, { emptyResponseDiagnostics: error.emptyResponseDiagnostics });
+        }
+        const logHint = paginationDiagnostics.length
+          ? ' 分页诊断：' + JSON.stringify(paginationDiagnostics)
+          : '';
+        throw new WorkerError(error.code, error.message + logHint, -32000, details);
       }
       throw error;
     } finally {
@@ -504,6 +524,7 @@ function rpcError(id, error) {
       code: workerError.rpcCode,
       errorCode: workerError.code,
       message: workerError.message,
+      ...(workerError.details ? { data: workerError.details } : {}),
     },
   };
 }

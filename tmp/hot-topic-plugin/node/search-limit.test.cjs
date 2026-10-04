@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {spawnSync} = require('node:child_process');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const {patchSearchLimit, parseSearchJsonl} = require('./crawler-adapter.cjs');
+const {patchSearchLimit, parseSearchJsonl, summarizeEmptyResponses} = require('./crawler-adapter.cjs');
 
 for (const platform of ['douyin', 'kuaishou']) {
   test(platform + ' enforces one unique-video budget across pages and keywords', () => {
@@ -74,4 +74,16 @@ test('JSONL cap applies across files after deduplication', () => {
       }
     }
   } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});
+
+test('empty response diagnostics are explicit and distinguish partial pages', () => {
+  const summary = summarizeEmptyResponses([
+    { keyword: '搞笑', path: '/aweme/v1/web/general/search/single/', dataCount: 0, hasMore: false },
+    { keyword: '校园', path: '/aweme/v1/web/general/search/single/', dataCount: 15, hasMore: true },
+  ]);
+  assert.equal(summary.count, 1);
+  assert.deepEqual(summary.keywords, ['搞笑']);
+  assert.deepEqual(summary.paths, ['/aweme/v1/web/general/search/single/']);
+  assert.equal(summary.allPagesEmpty, false);
+  assert.equal(summarizeEmptyResponses([{dataCount: 0, hasMore: false}]).allPagesEmpty, true);
 });

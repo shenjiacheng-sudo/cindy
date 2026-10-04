@@ -21,21 +21,45 @@ function fakeSession(events, headless = true) {
 test('logged-in searches stay background; expired login shows once then closes before collection', async () => {
   const events = [];
   const signal = new AbortController().signal;
-  await runPhases({ session: fakeSession(events), signal, run: async (phase) => { events.push(phase); return 'complete'; } });
+  await runPhases({ loginGraceMs: 0, session: fakeSession(events), signal, run: async (phase) => { events.push(phase); return 'complete'; } });
   assert.deepEqual(events, ['collect']);
   events.length = 0;
   const statuses = ['login-required', 'logged-in', 'complete'];
-  await runPhases({ session: fakeSession(events), signal, run: async (phase, session) => {
+  await runPhases({ loginGraceMs: 0, session: fakeSession(events), signal, run: async (phase, session) => {
     events.push(phase); assert.equal(session.headless, phase !== 'login'); return statuses.shift();
   } });
   assert.deepEqual(events, ['collect', 'visible', 'login', 'background', 'collect']);
+});
+
+test('empty collection retries at most twice without reopening login', async () => {
+  const events = [];
+  const signal = new AbortController().signal;
+  let attempts = 0;
+  await runPhases({ loginGraceMs: 0, session: fakeSession(events), signal, run: async (phase) => {
+    events.push(phase);
+    attempts += 1;
+    return attempts < 3 ? 'retry-collect' : 'complete';
+  } });
+  assert.equal(attempts, 3);
+  assert.deepEqual(events, ['collect', 'collect', 'collect']);
+});
+
+test('retry status does not exceed two additional collection attempts', async () => {
+  const events = [];
+  const signal = new AbortController().signal;
+  await runPhases({ loginGraceMs: 0, session: fakeSession(events), signal, run: async (phase) => {
+    events.push(phase);
+    return 'retry-collect';
+  } });
+  assert.equal(events.length, 3);
+  assert.deepEqual(events, ['collect', 'collect', 'collect']);
 });
 
 test('login failures and cancellation close the only visible window; failed reuse never loops login', async () => {
   for (const mode of ['failed', 'cancelled', 'expired']) {
     const events = [], controller = new AbortController();
     let calls = 0;
-    await assert.rejects(runPhases({ session: fakeSession(events), signal: controller.signal,
+    await assert.rejects(runPhases({ loginGraceMs: 0, session: fakeSession(events), signal: controller.signal,
       run: async (phase) => {
         calls++;
         if (phase === 'collect') return 'login-required';
@@ -182,7 +206,7 @@ test('worker targets qualifying results rather than candidate count and explicit
 
 test('login phase without a successful status is treated as a timeout/failure', async () => {
   const events = [];
-  await assert.rejects(runPhases({
+  await assert.rejects(runPhases({ loginGraceMs: 0,
     session: fakeSession(events),
     signal: new AbortController().signal,
     run: async (phase) => {
