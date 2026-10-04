@@ -112,6 +112,9 @@
       includeKeywords: Array.isArray(profile.includeKeywords)
         ? [...new Set(profile.includeKeywords.filter((item) => typeof item === 'string').map((item) => item.trim().slice(0, 80)).filter(Boolean))].slice(0, 50)
         : [],
+      minKeywordHits: Number.isInteger(Number(profile.minKeywordHits)) && Number(profile.minKeywordHits) >= 1 && Number(profile.minKeywordHits) <= 3 ? Number(profile.minKeywordHits) : 1,
+      minLikes: Number.isInteger(Number(profile.minLikes)) && Number(profile.minLikes) >= 0 && Number(profile.minLikes) <= 1000000000 ? Number(profile.minLikes) : 10000,
+      minFollowers: Number.isInteger(Number(profile.minFollowers)) && Number(profile.minFollowers) >= 0 && Number(profile.minFollowers) <= 1000000000 ? Number(profile.minFollowers) : 0,
       excludeKeywords: Array.isArray(profile.excludeKeywords)
         ? [...new Set(profile.excludeKeywords.filter((item) => typeof item === 'string').map((item) => item.trim().slice(0, 80)).filter(Boolean))].slice(0, 50)
         : [],
@@ -187,7 +190,7 @@
       : '';
     const url = safeExternalUrl(row.videoUrl);
     const link = url
-      ? `<a class="video-link" href="${escapeHtml(url)}" rel="noopener noreferrer">打开原视频 ↗</a>`
+      ? `<a class="video-link" href="${escapeHtml(url)}" aria-label="在系统浏览器打开原视频">打开原视频 ↗</a>`
       : '<span class="unavailable-link">原视频链接不可用</span>';
 
     return `<article class="result-card">
@@ -199,6 +202,7 @@
       <div class="metric-row" aria-label="视频互动数据">
         <span class="metric">发布 <strong>${escapeHtml(publishedLabel)}</strong></span>
         <span class="metric">点赞 <strong>${formatMetric(row.likes)}</strong></span>
+        <span class="metric">粉丝 <strong>${formatMetric(row.followers)}</strong></span>
         <span class="metric">收藏 <strong>${formatMetric(row.collects)}</strong></span>
         <span class="metric">评论 <strong>${formatMetric(row.comments)}</strong></span>
       </div>
@@ -371,6 +375,9 @@
         contentStyle: style.value.trim(),
         includeKeywords: parseKeywordInput(include.value),
         excludeKeywords: parseKeywordInput(exclude.value),
+        minKeywordHits: Number(getElement(doc, 'min-keyword-hits').value || 1),
+        minLikes: Number(getElement(doc, 'min-likes').value || 10000),
+        minFollowers: Number(getElement(doc, 'min-followers').value || 0),
         topN: Number(topN.value || 5),
         timeRange: timeRange.value,
         rankingWeights: {
@@ -394,6 +401,9 @@
       timeRange.value = value.timeRange;
       include.value = value.includeKeywords.join('，');
       exclude.value = value.excludeKeywords.join('，');
+      getElement(doc, 'min-keyword-hits').value = String(value.minKeywordHits);
+      getElement(doc, 'min-likes').value = String(value.minLikes);
+      getElement(doc, 'min-followers').value = String(value.minFollowers);
       getElement(doc, 'weight-engagement').value = String(value.rankingWeights.engagement);
       getElement(doc, 'weight-audience').value = String(value.rankingWeights.audienceMatch);
       getElement(doc, 'weight-keywords').value = String(value.rankingWeights.keywordRelevance);
@@ -503,7 +513,7 @@
         results.hidden = true;
         emptyState.hidden = false;
         emptyMessage.textContent = result.candidateCount > 0
-          ? '没有视频同时满足所选时间范围、点赞至少 10,000、赛道相关和两个关键词命中，本次不推荐。可调整时间范围或关键词。'
+          ? '没有视频同时满足所选时间范围、最低点赞数、最低粉丝量、赛道相关和关键词命中门槛，本次不推荐。可调整筛选门槛或时间范围。'
           : '本次采集没有返回可排序的视频；请检查登录状态或更换关键词。';
         return;
       }
@@ -543,6 +553,11 @@
       if (!Number.isInteger(profile.topN) || profile.topN < 1 || profile.topN > 50) {
         setStatus(status, 'error', '推荐数量需要是 1–50 之间的整数。');
         topN.focus();
+        return;
+      }
+      if (!Number.isInteger(profile.minKeywordHits) || profile.minKeywordHits < 1 || profile.minKeywordHits > 3) {
+        setStatus(status, 'error', '关键词最低命中数需要是 1–3 之间的整数。');
+        getElement(doc, 'min-keyword-hits').focus();
         return;
       }
       const weights = Object.values(profile.rankingWeights);

@@ -106,15 +106,27 @@
           </label>
           <label class="field" for="include-keywords">
             <span class="field-label">采集与筛选关键词</span>
-            <input id="include-keywords" name="includeKeywords" class="input" autocomplete="off" placeholder="至少两个，逗号分隔，例如：校园、同桌">
+            <input id="include-keywords" name="includeKeywords" class="input" autocomplete="off" placeholder="至少一个，逗号分隔，例如：校园、同桌">
           </label>
           <label class="field" for="exclude-keywords">
             <span class="field-label">排除关键词</span>
             <input id="exclude-keywords" name="excludeKeywords" class="input" autocomplete="off" placeholder="可选，命中后过滤">
           </label>
+          <label class="field" for="min-keyword-hits">
+            <span class="field-label">关键词最低命中数</span>
+            <input id="min-keyword-hits" name="minKeywordHits" class="input" type="number" min="1" max="3" step="1" value="1">
+          </label>
+          <label class="field" for="min-likes">
+            <span class="field-label">最低点赞数</span>
+            <input id="min-likes" name="minLikes" class="input" type="number" min="0" max="1000000000" step="1" value="10000">
+          </label>
+          <label class="field" for="min-followers">
+            <span class="field-label">最低博主粉丝量</span>
+            <input id="min-followers" name="minFollowers" class="input" type="number" min="0" max="1000000000" step="1" value="0">
+          </label>
         </div>
 
-        <p class="data-note">入选门槛：点赞至少 10,000、标题或正文有赛道依据、至少命中两个不同关键词。收藏和评论不限。按返回数量持续补充候选，最多检查 500 条、用时 12 分钟。不达标不推荐，未补足会显示缺口。赛道依据为文本匹配，不代表已观看视频。</p>
+        <p class="data-note">入选门槛：最低点赞数、最低博主粉丝量、标题或正文赛道依据、关键词命中数均按上方设置。粉丝量缺失时不会通过正向粉丝门槛。按返回数量持续补充候选，最多检查 500 条、用时 12 分钟。不达标不推荐，未补足会显示缺口。</p>
         <details class="weights">
           <summary>调整排序权重</summary>
           <div class="weight-grid">

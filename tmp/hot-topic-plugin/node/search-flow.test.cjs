@@ -179,3 +179,18 @@ test('worker targets qualifying results rather than candidate count and explicit
     }
   } finally { collector.collectMediaCrawler = original; }
 });
+
+test('login phase without a successful status is treated as a timeout/failure', async () => {
+  const events = [];
+  await assert.rejects(runPhases({
+    session: fakeSession(events),
+    signal: new AbortController().signal,
+    run: async (phase) => {
+      events.push(phase);
+      if (phase === 'collect') return 'login-required';
+      return 'login-failed';
+    },
+  }), { code: 'LOGIN_INCOMPLETE' });
+  assert.deepEqual(events, ['collect', 'visible', 'login', 'close']);
+  assert.equal(events.includes('background'), false);
+});

@@ -121,6 +121,20 @@ function parseMetric(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : null;
 }
 
+function pickFollowerMetric(raw) {
+  const direct = ['followers', 'follower_count', 'fans_count', 'author_follower_count', 'user_fans']
+    .map((key) => raw[key]).find((value) => value !== undefined);
+  if (direct !== undefined) return parseMetric(direct);
+  for (const containerKey of ['author', 'author_info', 'user', 'user_info']) {
+    const container = raw[containerKey];
+    if (!container || typeof container !== 'object' || Array.isArray(container)) continue;
+    const nested = ['followers', 'follower_count', 'fans_count', 'author_follower_count', 'user_fans']
+      .map((key) => container[key]).find((value) => value !== undefined);
+    if (nested !== undefined) return parseMetric(nested);
+  }
+  return null;
+}
+
 function normalizeVideo(raw, index, platformHint) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new WorkerError('INVALID_VIDEO', `第 ${index + 1} 条视频记录必须是对象。`);
@@ -145,6 +159,7 @@ function normalizeVideo(raw, index, platformHint) {
     likes: parseMetric(raw.likes === undefined ? raw.liked_count : raw.likes),
     collects: parseMetric(raw.collects === undefined ? raw.collected_count : raw.collects),
     comments: parseMetric(raw.comments === undefined ? raw.comment_count : raw.comments),
+    followers: pickFollowerMetric(raw),
     publishedAt,
   };
 }
@@ -279,9 +294,15 @@ function qualifyVideo(video, config) {
   const nicheHits = (campus ? campusTerms : nicheTerms).filter((word) => text.includes(word));
   const nicheMatch = campus ? nicheHits.length > 0 : nicheTerms.length > 0 && nicheHits.length === nicheTerms.length;
   const reasons = [];
-  if (video.likes === null || video.likes < 10000) reasons.push("likes");
+  const minLikes = Number.isInteger(Number(config.minLikes)) ? Math.max(0, Math.min(1000000000, Number(config.minLikes))) : 10000;
+  const minFollowers = Number.isInteger(Number(config.minFollowers)) ? Math.max(0, Math.min(1000000000, Number(config.minFollowers))) : 0;
+  if (video.likes === null || video.likes < minLikes) reasons.push("likes");
+  if (minFollowers > 0 && (video.followers === null || video.followers < minFollowers)) reasons.push("followers");
   if (!nicheMatch) reasons.push("niche");
-  if (keywordHits.length < 2) reasons.push("keywords");
+  const minimumKeywordHits = Number.isInteger(Number(config.minKeywordHits))
+    ? Math.max(1, Math.min(3, Number(config.minKeywordHits)))
+    : 1;
+  if (keywordHits.length < minimumKeywordHits) reasons.push("keywords");
   return { passed: reasons.length === 0, reasons, keywordHits, nicheHits, method: "title-description-text" };
 }
 
@@ -333,6 +354,8 @@ function rankHotTopics(params, now = Date.now()) {
   const topN = Number.isInteger(topNValue) ? Math.max(1, Math.min(50, topNValue)) : 10;
   const qualified = scored.map((video) => ({ ...video, qualification: qualifyVideo(video, config) }));
   const filteredByReason = { likes: 0, niche: 0, keywords: 0 };
+  const configuredMinFollowers = Number.isInteger(Number(config.minFollowers)) ? Math.max(0, Math.min(1000000000, Number(config.minFollowers))) : 0;
+  if (configuredMinFollowers > 0) filteredByReason.followers = 0;
   for (const video of qualified) {
     for (const reason of video.qualification.reasons) filteredByReason[reason] += 1;
   }
@@ -362,7 +385,7 @@ function rankHotTopics(params, now = Date.now()) {
     filteredCount: missingPublishTimeCount + outsideTimeRangeCount
       + qualified.filter((video) => video.excludedBy || !video.qualification.passed).length,
     filteredByReason,
-    eligibility: { minLikes: 10000, minKeywordHits: 2, requireNicheMatch: true, method: "title-description-text" },
+    eligibility: { minLikes: Number.isInteger(Number(config.minLikes)) ? Math.max(0, Math.min(1000000000, Number(config.minLikes))) : 10000, minFollowers: Number.isInteger(Number(config.minFollowers)) ? Math.max(0, Math.min(1000000000, Number(config.minFollowers))) : 0, minKeywordHits: Number.isInteger(Number(config.minKeywordHits)) ? Math.max(1, Math.min(3, Number(config.minKeywordHits))) : 1, requireNicheMatch: true, method: "title-description-text" },
     total: items.length,
     requestedCount: topN,
     shortfall: Math.max(0, topN - items.length),

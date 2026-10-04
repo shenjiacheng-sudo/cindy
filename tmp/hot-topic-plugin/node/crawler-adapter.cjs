@@ -11,13 +11,14 @@ const MAX_JSONL_BYTES = 16 * 1024 * 1024;
 const MAX_SOURCE_ARCHIVE_BYTES = 128 * 1024 * 1024;
 const MAX_RESULT_ROWS = 500;
 const MAX_RUNTIME_MS = 12 * 60 * 1000;
+const LOGIN_TIMEOUT_MS = 90 * 1000;
 const SUPPORTED_PLATFORMS = new Set(['douyin', 'kuaishou']);
 const ACTIVE_CHILDREN = new Set();
 const ACTIVE_RUNS = new Set();
 const SAFE_JSON_FIELDS = [
   'aweme_id', 'video_id', 'title', 'desc', 'text', 'nickname', 'author',
   'aweme_url', 'video_url', 'liked_count', 'collected_count', 'comment_count',
-  'publish_time', 'create_time',
+  'publish_time', 'create_time', 'followers', 'follower_count', 'fans_count', 'author_follower_count', 'user_fans', 'author_info', 'user_info',
 ];
 
 class CollectorError extends Error {
@@ -285,12 +286,23 @@ function childIsRunning(child) {
   return Boolean(child && child.exitCode === null && child.signalCode === null);
 }
 
+function safeProcessMessage(value) {
+  return String(value || '')
+    .replace(/https?:\/\/[^\s]+/gi, '[url]')
+    .replace(/\/Users\/[^\s]+/g, '[path]')
+    .replace(/\b(?:cookie|token|authorization|password|secret|session)\b[^\n]*/gi, '[redacted]')
+    .replace(/(?:^|\s)(?:--?w*(?:cookie|token|password|secret)[^\s=]*)(?:=|\s+)\S+/gi, ' [redacted]')
+    .slice(-1200);
+}
+
 function runChild(command, args, options, signal, onSpawn, timeoutMs = MAX_RUNTIME_MS) {
   return new Promise((resolve, reject) => {
     let child;
     let settled = false;
     let stopping = false;
     let timedOut = false;
+    let stderr = '';
+    let stdout = '';
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
@@ -341,11 +353,25 @@ function runChild(command, args, options, signal, onSpawn, timeoutMs = MAX_RUNTI
         ACTIVE_CHILDREN.delete(child);
         finish(collectorError('COLLECTOR_START_FAILED', '无法启动本机采集环境；请检查 Python 环境与权限。'));
       });
+      if (child.stderr) child.stderr.on('data', (chunk) => {
+        stderr = (stderr + chunk.toString('utf8')).slice(-2400);
+      });
+      if (child.stdout) child.stdout.on('data', (chunk) => {
+        stdout = (stdout + chunk.toString('utf8')).slice(-2400);
+      });
       child.once('exit', (code, signalName) => {
         ACTIVE_CHILDREN.delete(child);
         if (settled || stopping) return;
-        if (code === 0) finish(null, { code, signal: signalName });
-        else finish(collectorError(timedOut ? 'COLLECTOR_TIMEOUT' : 'COLLECTOR_EXITED', '本机采集未正常完成；请检查独立浏览器登录页面后重试。'));
+        if (code === 0) finish(null, {
+          code,
+          signal: signalName,
+          stdout: safeProcessMessage(stdout),
+          stderr: safeProcessMessage(stderr),
+        });
+        else finish(collectorError(
+          timedOut ? 'COLLECTOR_TIMEOUT' : 'COLLECTOR_EXITED',
+          safeProcessMessage(stderr) || '本机采集未正常完成；请检查独立浏览器登录页面后重试。',
+        ));
       });
     } catch {
       finish(collectorError('COLLECTOR_START_FAILED', '无法启动本机采集环境；请检查 Python 环境与权限。'));
@@ -418,7 +444,7 @@ function findSearchFiles(root) {
     for (const entry of entries) {
       const fullPath = path.join(current.dir, entry.name);
       if (entry.isDirectory() && current.depth < 8) queue.push({ dir: fullPath, depth: current.depth + 1 });
-      else if (entry.isFile() && /^search_contents_.*\.jsonl$/i.test(entry.name)) files.push(fullPath);
+      else if (entry.isFile() && /\.(jsonl|json)$/i.test(entry.name)) files.push(fullPath);
     }
   }
   return files.sort((left, right) => fs.statSync(right).mtimeMs - fs.statSync(left).mtimeMs);
@@ -432,6 +458,15 @@ function safeJsonRecord(value, platform) {
     const entry = value[field];
     if (typeof entry === 'string') result[field] = entry.slice(0, field === 'desc' || field === 'text' ? 6000 : 2048);
     else if (typeof entry === 'number' && Number.isFinite(entry)) result[field] = entry;
+  }
+  for (const containerKey of ['author', 'author_info', 'user', 'user_info']) {
+    const container = value[containerKey];
+    if (!container || typeof container !== 'object' || Array.isArray(container)) continue;
+    for (const field of ['followers', 'follower_count', 'fans_count', 'author_follower_count', 'user_fans']) {
+      if (result[field] !== undefined || container[field] === undefined) continue;
+      const entry = container[field];
+      if ((typeof entry === 'string' && entry.length <= 2048) || (typeof entry === 'number' && Number.isFinite(entry))) result[field] = entry;
+    }
   }
   result.platform = platform;
   return result;
@@ -450,11 +485,21 @@ function parseSearchJsonl(outputRoot, platform, maxItems = 10) {
     totalBytes += size;
     if (totalBytes > MAX_JSONL_BYTES) throw collectorError('COLLECTOR_OUTPUT_TOO_LARGE', '采集结果超过本机试用版大小限制，已停止读取。');
     const text = fs.readFileSync(file, 'utf8');
-    for (const line of text.split(/\r?\n/)) {
+    let records;
+    try {
+      const trimmed = text.trim();
+      const parsed = /\.json$/i.test(file) || trimmed.startsWith('[') || trimmed.startsWith('{')
+        ? JSON.parse(trimmed)
+        : null;
+      records = parsed === null ? text.split(/\r?\n/) : (Array.isArray(parsed) ? parsed : [parsed]);
+    } catch {
+      records = text.split(/\r?\n/);
+    }
+    for (const entry of records) {
       if (rows.length >= rowLimit) return rows;
-      if (!line.trim()) continue;
+      if (entry === null || entry === undefined || (typeof entry === 'string' && !entry.trim())) continue;
       try {
-        const row = safeJsonRecord(JSON.parse(line), platform);
+        const row = safeJsonRecord(typeof entry === 'string' ? JSON.parse(entry) : entry, platform);
         if (row) {
           const id = platform === 'douyin' ? row.aweme_id : row.video_id;
           const key = id === undefined || id === null || id === '' ? null : String(id);
@@ -547,6 +592,7 @@ async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 
   let completed = false;
   let session;
   let monitor;
+  const phaseDiagnostics = [];
   let endReason = 'search-ended';
   const deadline = Date.now() + MAX_RUNTIME_MS;
 
@@ -589,24 +635,44 @@ async function collectMediaCrawler({ crawlerRoot, profile, platform, maxItems = 
         run: async (phase, current) => {
           fs.rmSync(statusFile, { force: true });
           if (Date.now() >= deadline) throw collectorError('COLLECTOR_TIMEOUT', '本次搜索已达到时间上限。');
-          await runChild(environment.pythonPath, args, {
+          const processResult = await runChild(environment.pythonPath, args, {
             cwd: sourceRoot,
             env: { ...env, CINDY_SEARCH_PHASE: phase, CINDY_SEARCH_STATUS: statusFile,
               CINDY_SEARCH_CONTROL: controlRoot, CINDY_BROWSER_WS: current.wsUrl,
               CINDY_BROWSER_PORT: String(current.port) },
-            stdio: 'ignore', windowsHide: true, detached: true,
-          }, signal, (child) => { activeRun.child = child; }, deadline - Date.now());
-          return fs.existsSync(statusFile) ? fs.readFileSync(statusFile, 'utf8') : 'complete';
+            stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, detached: true,
+          }, signal, (child) => { activeRun.child = child; }, Math.min(
+            deadline - Date.now(),
+            phase === 'login' ? LOGIN_TIMEOUT_MS : MAX_RUNTIME_MS,
+          ));
+          const phaseStatus = fs.existsSync(statusFile) ? fs.readFileSync(statusFile, 'utf8').trim() : 'missing';
+          phaseDiagnostics.push({ phase, ...processResult, phaseStatus });
+          if (phaseStatus !== 'missing') return phaseStatus;
+          return phase === 'login' ? 'login-failed' : 'complete';
         },
       });
     } catch (error) {
-      if (error.code !== 'COLLECTOR_TIMEOUT' && error.code !== 'COLLECTOR_EXITED') throw error;
-      endReason = error.code === 'COLLECTOR_TIMEOUT' ? 'time-limit' : 'collector-error';
+      if (error.code !== 'COLLECTOR_TIMEOUT') throw error;
+      endReason = 'time-limit';
     }
     if (monitor.error) throw monitor.error;
     if (signal.aborted) throw collectorError('COLLECTOR_CANCELLED', '本次采集已取消。');
     if (onProgress) onProgress('正在整理本次搜索结果…');
-    const videos = findSearchFiles(outputRoot).length ? parseSearchJsonl(outputRoot, safePlatform, maxItems) : [];
+    const outputFiles = findSearchFiles(outputRoot);
+    const dataRoot = path.join(sourceRoot, 'data');
+    const dataFiles = outputFiles.length ? [] : findSearchFiles(dataRoot);
+    const resultRoot = outputFiles.length ? outputRoot : dataRoot;
+    const resultFiles = outputFiles.length ? outputFiles : dataFiles;
+    if (!resultFiles.length) {
+      const details = phaseDiagnostics.map(({ phase, code, signal, phaseStatus, stdout, stderr }) => {
+        const parts = [phase + ':exit=' + code, 'signal=' + (signal || 'none'), 'status=' + phaseStatus];
+        if (stdout) parts.push('stdout=' + stdout);
+        if (stderr) parts.push('stderr=' + stderr);
+        return parts.join('; ');
+      }).join(' | ');
+      throw collectorError('COLLECTOR_NO_DATA', '采集完成但 output/ 和 data/ 都没有搜索结果文件。' + (details ? ' 诊断：' + details : ''));
+    }
+    const videos = parseSearchJsonl(resultRoot, safePlatform, maxItems);
     if (monitor.stopped) endReason = 'target-reached';
     else if (videos.length >= maxItems) endReason = 'candidate-limit';
     completed = true;

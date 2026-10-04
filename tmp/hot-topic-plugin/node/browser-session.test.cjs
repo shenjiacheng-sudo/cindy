@@ -10,7 +10,7 @@ const worker = require('./worker.cjs');
 const collector = require('./crawler-adapter.cjs');
 
 test('eligibility is mandatory regardless of weights, counts actual likes and ignores author keywords', () => {
-  const config = { niche: '校园剧情', audience: '年轻人', includeKeywords: ['反转', '同桌'], topN: 50,
+  const config = { niche: '校园剧情', audience: '年轻人', includeKeywords: ['反转', '同桌'], minKeywordHits: 2, topN: 50,
     rankingWeights: { engagement: 1, audienceMatch: 0, keywordRelevance: 0 } };
   const result = worker.rankHotTopics({ timeRange: 'all', ...config, videos: [
     { id: 'pass', title: '教室里的同桌反转', likes: '1万', collects: null },

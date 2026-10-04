@@ -44,7 +44,7 @@ function cleanWeights(value) {
 }
 
 function cleanProfile(value, partial = false, fallbackId = 'profile-default') {
-  if (!isRecord(value)) return partial ? {} : { id: fallbackId, name: '我的创作档案', accountName: '', platforms: ['douyin', 'kuaishou'], niche: '', audience: '', contentStyle: '', includeKeywords: [], excludeKeywords: [], topN: 5, timeRange: '1m', rankingWeights: DEFAULT_WEIGHTS };
+  if (!isRecord(value)) return partial ? {} : { id: fallbackId, name: '我的创作档案', accountName: '', platforms: ['douyin', 'kuaishou'], niche: '', audience: '', contentStyle: '', includeKeywords: [], excludeKeywords: [], minKeywordHits: 1, minLikes: 10000, minFollowers: 0, topN: 5, timeRange: '1m', rankingWeights: DEFAULT_WEIGHTS };
   const profile = {};
   if (!partial || hasOwn(value, 'id')) profile.id = /^[A-Za-z0-9_-]{1,64}$/.test(boundedString(value.id, 64)) ? value.id : fallbackId;
   if (!partial || hasOwn(value, 'name')) profile.name = boundedString(value.name, 60) || '我的创作档案';
@@ -59,6 +59,16 @@ function cleanProfile(value, partial = false, fallbackId = 'profile-default') {
   }
   for (const key of ['includeKeywords', 'excludeKeywords']) {
     if (!partial || hasOwn(value, key)) profile[key] = cleanKeywordList(value[key]);
+  }
+  if (!partial || hasOwn(value, 'minKeywordHits')) {
+    const minimum = Number(value.minKeywordHits);
+    profile.minKeywordHits = Number.isInteger(minimum) && minimum >= 1 && minimum <= 3 ? minimum : 1;
+  }
+  for (const key of ['minLikes', 'minFollowers']) {
+    if (!partial || hasOwn(value, key)) {
+      const minimum = Number(value[key]);
+      profile[key] = Number.isInteger(minimum) && minimum >= 0 && minimum <= 1000000000 ? minimum : (key === 'minLikes' ? 10000 : 0);
+    }
   }
   if (!partial || hasOwn(value, 'topN')) {
     const topN = Number(value.topN);
@@ -114,7 +124,7 @@ function cleanVideos(value) {
     'id', 'aweme_id', 'video_id', 'photo_id', 'platform', 'title', 'desc', 'text', 'caption',
     'author', 'nickname', 'authorName', 'author_name', 'authorUrl', 'author_url',
     'videoUrl', 'aweme_url', 'video_url', 'likes', 'liked_count', 'collects', 'collected_count',
-    'comments', 'comment_count', 'publishedAt', 'publish_time', 'create_time',
+    'comments', 'comment_count', 'followers', 'follower_count', 'fans_count', 'author_follower_count', 'user_fans', 'publishedAt', 'publish_time', 'create_time',
   ];
   const result = value.map((item) => {
     if (!isRecord(item)) return {};
@@ -209,9 +219,13 @@ function collectionParams(overrides, requestId) {
   if (!params.niche || !params.audience) {
     throw Object.assign(new Error('请先在插件面板填写当前博主档案的赛道与目标粉丝。'), { code: 'PROFILE_INCOMPLETE' });
   }
-  if (new Set(params.includeKeywords.map((word) => word.normalize("NFKC").toLowerCase())).size < 2) {
-    throw Object.assign(new Error("请填写至少两个不同关键词；入选视频必须命中其中至少两个。"), { code: "KEYWORDS_REQUIRED" });
+  const minKeywordHits = Number.isInteger(Number(params.minKeywordHits))
+    ? Math.max(1, Math.min(3, Number(params.minKeywordHits)))
+    : 1;
+  if (new Set(params.includeKeywords.map((word) => word.normalize("NFKC").toLowerCase())).size < minKeywordHits) {
+    throw Object.assign(new Error("请至少填写 " + minKeywordHits + " 个不同关键词；入选视频必须命中其中 " + minKeywordHits + " 个。"), { code: "KEYWORDS_REQUIRED" });
   }
+  params.minKeywordHits = minKeywordHits;
   const platform = selectedPlatform(params, params.platform);
   if (!savedState.crawlerRoot) {
     throw Object.assign(new Error('请先在插件面板选择本机已有的 MediaCrawler 项目目录。'), { code: 'COLLECTOR_NOT_CONFIGURED' });
@@ -276,8 +290,15 @@ async function handlePanelRequest(message) {
       if (message.method === 'load_hot_topic_fixture') return callWorker(message.method, {});
       if (cancelledPanelCalls.has(reqId)) throw Object.assign(new Error('本次采集已取消。'), { code: 'COLLECTOR_CANCELLED' });
       const params = collectionParams(message.params, reqId);
-      sendPanelProgress(reqId, '本机采集正在运行；将复用专用浏览器，首次登录或登录失效时请扫码。');
-      const heartbeat = setInterval(() => sendPanelProgress(reqId, '本机关键词搜索仍在运行；请留意独立浏览器。'), 20000);
+      const startedAt = Date.now();
+      sendPanelProgress(reqId, '已进入后台搜索；正在检查登录状态和采集环境…');
+      const heartbeat = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        const message = elapsed < 90
+          ? '后台搜索已运行 ' + elapsed + ' 秒；正在补充候选并筛选合格视频…'
+          : '后台搜索已运行 ' + elapsed + ' 秒；平台响应较慢，仍在等待结果（登录等待最多 90 秒）…';
+        sendPanelProgress(reqId, message);
+      }, 5000);
       try {
         return await callWorker('rank_hot_topics', params, { timeoutMs: 60000, maxTotalMs: 900000 });
       } finally {

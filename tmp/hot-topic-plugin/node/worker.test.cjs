@@ -360,6 +360,22 @@ test('MediaCrawler field aliases map without fabricating author, links, or missi
   assert.equal(sparse.comments, null);
 });
 
+test('custom like and follower thresholds are enforced and nested follower fields are normalized', () => {
+  const nested = worker.normalizeVideo({ id: 'nested', platform: 'douyin', title: '职场沟通', likes: 15000, author_info: { fans_count: '2.3万' } }, 0);
+  assert.equal(nested.followers, 23000);
+  const result = worker.rankHotTopics({ timeRange: 'all', niche: '职场', audience: '职场人', includeKeywords: ['沟通'], minKeywordHits: 1, minLikes: 12000, minFollowers: 20000, videos: [
+    { id: 'pass', title: '职场沟通', likes: 15000, followers: 23000 },
+    { id: 'low-like', title: '职场沟通', likes: 11000, followers: 23000 },
+    { id: 'low-followers', title: '职场沟通', likes: 15000, followers: 19999 },
+    { id: 'missing-followers', title: '职场沟通', likes: 15000 },
+  ] });
+  assert.deepEqual(result.items.map((item) => item.id), ['pass']);
+  assert.equal(result.filteredByReason.likes, 1);
+  assert.equal(result.filteredByReason.followers, 2);
+  assert.equal(result.eligibility.minLikes, 12000);
+  assert.equal(result.eligibility.minFollowers, 20000);
+});
+
 test('exclude keywords filter results and metrics are never estimated', () => {
   const result = worker.rankHotTopics({ timeRange: 'all',
     videos: [
