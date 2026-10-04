@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 3,
+  "minCindyVersion": "1.0.0",
+  "id": "hot-topic-plugin",
+  "name": "热点选题助手",
+  "description": "在本机用抖音或快手关键词搜索结果匹配多个博主档案，并生成可尝试的创作思路。",
+  "whenToUse": "用户想根据不同博主账号风格筛选短视频选题，或用本机 MediaCrawler 对抖音、快手关键词搜索结果排序并整理创作思路时。",
+  "version": "1.5.0",
+  "kind": "chip",
+  "entry": "main.js",
+  "launch": "on-demand",
+  "command": "热点",
+  "panel": {
+    "title": "热点选题助手",
+    "position": "left",
+    "html": "index.html",
+    "minWidth": 320,
+    "defaultFraction": 0.36
+  },
+  "pick": true,
+  "tools": [
+    {
+      "name": "rank_hot_topics",
+      "description": "按当前博主档案排序短视频并生成差异化创作思路。若 videos 是非空数组，只分析调用方提供的数据；若未传 videos 或为空，插件会从面板里用户亲自选择的本机 MediaCrawler 目录运行抖音/快手关键词搜索，需要登录时仅显示一个扫码窗口，登录后自动关闭并转回后台。关键词搜索不是全站热榜；不抓评论、不下载视频。缺少指标保持不可用，不估算。 入选必须同时满足点赞至少10000、标题或正文有赛道文本依据、至少命中两个不同关键词；收藏和评论不限。无合格结果不凑数。文本匹配不代表理解视频画面，返回命中词供复核。连续搜索复用本插件专用后台浏览器和原生登录资料；系统清理临时资料或平台登录失效后可能需要扫码。按 topN 合格结果目标补充候选，最多检查500条，整个流程最多12分钟；结果不超过topN，不足时返回shortfall、collectionEndReason和completionMessage，绝不降低门槛补数。 排序前按平台和视频ID去重，同一ID保留首次出现的记录；发布时间按当前档案范围过滤，默认近一个月。不跨多次搜索永久屏蔽视频。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "videos": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "可选。非空时排序调用方提供的视频数据；未传或为空时使用本机关键词搜索。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "maxLength": 160,
+                  "description": "视频 ID。"
+                },
+                "aweme_id": {
+                  "type": "string",
+                  "maxLength": 160,
+                  "description": "MediaCrawler 抖音视频 ID。"
+                },
+                "video_id": {
+                  "type": "string",
+                  "maxLength": 160,
+                  "description": "MediaCrawler 快手视频 ID。"
+                },
+                "platform": {
+                  "type": "string",
+                  "enum": [
+                    "douyin",
+                    "kuaishou",
+                    "xhs"
+                  ]
+                },
+                "title": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "desc": {
+                  "type": "string",
+                  "maxLength": 6000
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 6000
+                },
+                "author": {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                "nickname": {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                "authorUrl": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "author_url": {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                "videoUrl": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "aweme_url": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "video_url": {
+                  "type": "string",
+                  "maxLength": 2048
+                },
+                "likes": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "liked_count": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "collects": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "collected_count": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "comments": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "comment_count": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "publishedAt": {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                "publish_time": {
+                  "type": [
+                    "string",
+                    "number"
+                  ]
+                },
+                "create_time": {
+                  "type": [
+                    "string",
+                    "number"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "douyin",
+              "kuaishou"
+            ],
+            "description": "本次平台。省略时使用当前档案里第一个已选平台；选择的平台必须已在插件面板勾选。"
+          },
+          "niche": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "创作者赛道；省略时沿用活动档案。"
+          },
+          "audience": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600,
+            "description": "目标粉丝画像及其关注需求；省略时沿用活动档案。"
+          },
+          "contentStyle": {
+            "type": "string",
+            "maxLength": 240,
+            "description": "创作者自己的表达风格或专业特点；省略时沿用活动档案。"
+          },
+          "includeKeywords": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "description": "至少填写两个不同筛选关键词；入选视频必须命中其中至少两个。本机搜索最多取前三个。"
+          },
+          "excludeKeywords": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "description": "命中后过滤视频的关键词。"
+          },
+          "topN": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "返回条数；省略时沿用活动档案。"
+          },
+          "rankingWeights": {
+            "type": "object",
+            "description": "可选权重，分别为互动表现、画像匹配和关键词相关；省略时沿用活动档案。",
+            "properties": {
+              "engagement": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "audienceMatch": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "keywordRelevance": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "timeRange": {
+            "type": "string",
+            "enum": [
+              "7d",
+              "1m",
+              "3m",
+              "6m",
+              "1y",
+              "3y",
+              "all"
+            ],
+            "description": "发布时间范围：近一周、近一个月、近一个季度、近半年、近一年、近三年、不限时间。省略时沿用当前档案，默认近一个月；启用时间筛选时排除缺失/无效/未来发布时间。"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "load_hot_topic_fixture",
+      "description": "读取随包抖音静态示例快照，只用于验证排序界面；数据不是实时热点。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "node": {
+    "entry": "node/worker.cjs",
+    "protocol": "json-rpc-stdio",
+    "lifecycle": "on-demand",
+    "idleTimeoutSeconds": 120
+  },
+  "manual": {
+    "items": [
+      {
+        "dir": "manual/getting-started",
+        "name": "getting-started",
+        "description": "配置多个博主档案、选择本机关键词搜索环境，并理解扫码登录与数据限制。"
+      }
+    ]
+  }
+}

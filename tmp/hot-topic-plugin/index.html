@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>热点选题助手</title>
+  <link rel="stylesheet" href="/panel.css">
+  <script src="/panel.js" defer></script>
+</head>
+<body>
+  <main class="app">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">创作工作台</p>
+        <h1>热点选题助手</h1>
+        <p class="intro">按你的账号风格筛选抖音、快手关键词搜索结果，并整理可尝试的创作角度。</p>
+      </div>
+      <span class="source-badge" id="source-label">等待设置</span>
+    </header>
+
+    <section class="panel collector-panel" aria-labelledby="collector-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="collector-title">本机采集环境</h2>
+          <p class="section-copy">个人学习试用版：使用你已有的 MediaCrawler 环境，不上传登录资料。</p>
+        </div>
+      </div>
+      <div class="collector-setup">
+        <p class="status" id="crawler-status" role="status" aria-live="polite">请先选择本机已有的 MediaCrawler 项目目录。</p>
+        <div class="collector-controls">
+          <label class="field run-platform-field" for="run-platform">
+            <span class="field-label">本次采集平台</span>
+            <select id="run-platform" class="input"></select>
+          </label>
+          <button class="button button-secondary" id="select-crawler" type="button">选择采集环境</button>
+        </div>
+      </div>
+      <p class="selected-path" id="crawler-path" hidden></p>
+      <p class="data-note">搜索在后台运行；仅需要登录时显示一个扫码窗口，登录后自动关闭。复用插件专用登录状态，不读取日常浏览器资料。系统清理临时资料或平台登录失效后可能需要重新扫码。</p>
+    </section>
+
+    <section class="panel" aria-labelledby="profile-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="profile-title">博主档案</h2>
+          <p class="section-copy">不同账号可分别保存平台、受众和表达风格。</p>
+        </div>
+      </div>
+
+      <div class="profile-toolbar">
+        <label class="field profile-picker" for="profile-select">
+          <span class="field-label">当前档案</span>
+          <select id="profile-select" class="input" aria-label="选择博主档案"></select>
+        </label>
+        <div class="profile-actions">
+          <button class="button button-secondary" id="add-profile" type="button">新增档案</button>
+          <button class="button button-secondary" id="delete-profile" type="button">删除档案</button>
+        </div>
+      </div>
+
+      <form id="profile-form" novalidate>
+        <div class="field-grid">
+          <label class="field" for="profile-name">
+            <span class="field-label">档案名称 <span class="required-mark">必填</span></span>
+            <input id="profile-name" name="profileName" class="input" maxlength="60" autocomplete="off" placeholder="例如：职场成长账号">
+          </label>
+          <label class="field" for="account-name">
+            <span class="field-label">账号名称 <span class="optional-mark">可选</span></span>
+            <input id="account-name" name="accountName" class="input" maxlength="80" autocomplete="off" placeholder="仅用于区分档案，不会登录账号">
+          </label>
+          <fieldset class="field field-full platform-fieldset">
+            <legend class="field-label">采集平台</legend>
+            <div class="platform-options">
+              <label class="check-field"><input id="platform-douyin" name="platform" type="checkbox" value="douyin"><span>抖音</span></label>
+              <label class="check-field"><input id="platform-kuaishou" name="platform" type="checkbox" value="kuaishou"><span>快手</span></label>
+            </div>
+          </fieldset>
+          <label class="field" for="niche">
+            <span class="field-label">赛道 <span class="required-mark">必填</span></span>
+            <input id="niche" name="niche" class="input" maxlength="120" autocomplete="off" placeholder="例如：美食探店、职场成长">
+          </label>
+          <label class="field" for="top-n">
+            <span class="field-label">推荐数量</span>
+            <input id="top-n" name="topN" class="input" type="number" min="1" max="50" step="1" value="5">
+          </label>
+          <label class="field" for="time-range">
+            <span class="field-label">视频发布时间</span>
+            <select id="time-range" name="timeRange" class="input">
+              <option value="7d">近一周</option>
+              <option value="1m" selected>近一个月</option>
+              <option value="3m">近一个季度</option>
+              <option value="6m">近半年</option>
+              <option value="1y">近一年</option>
+              <option value="3y">近三年</option>
+              <option value="all">不限时间</option>
+            </select>
+          </label>
+          <p class="data-note">按当前时间往前计算；启用时间筛选时，发布时间缺失或无效的视频不入选。</p>
+          <label class="field field-full" for="audience">
+            <span class="field-label">目标粉丝 <span class="required-mark">必填</span></span>
+            <textarea id="audience" name="audience" class="textarea" maxlength="600" placeholder="描述受众关注什么，例如：刚工作的年轻人，关注沟通与效率"></textarea>
+          </label>
+          <label class="field field-full" for="content-style">
+            <span class="field-label">账号风格</span>
+            <input id="content-style" name="contentStyle" class="input" maxlength="240" autocomplete="off" placeholder="例如：真实案例、口语表达、步骤拆解">
+          </label>
+          <label class="field" for="include-keywords">
+            <span class="field-label">采集与筛选关键词</span>
+            <input id="include-keywords" name="includeKeywords" class="input" autocomplete="off" placeholder="至少两个，逗号分隔，例如：校园、同桌">
+          </label>
+          <label class="field" for="exclude-keywords">
+            <span class="field-label">排除关键词</span>
+            <input id="exclude-keywords" name="excludeKeywords" class="input" autocomplete="off" placeholder="可选，命中后过滤">
+          </label>
+        </div>
+
+        <p class="data-note">入选门槛：点赞至少 10,000、标题或正文有赛道依据、至少命中两个不同关键词。收藏和评论不限。按返回数量持续补充候选，最多检查 500 条、用时 12 分钟。不达标不推荐，未补足会显示缺口。赛道依据为文本匹配，不代表已观看视频。</p>
+        <details class="weights">
+          <summary>调整排序权重</summary>
+          <div class="weight-grid">
+            <label class="field" for="weight-engagement">
+              <span class="field-label">互动表现</span>
+              <input id="weight-engagement" class="input" type="number" min="0" max="1" step="0.05" value="0.40">
+            </label>
+            <label class="field" for="weight-audience">
+              <span class="field-label">画像匹配</span>
+              <input id="weight-audience" class="input" type="number" min="0" max="1" step="0.05" value="0.35">
+            </label>
+            <label class="field" for="weight-keywords">
+              <span class="field-label">关键词相关</span>
+              <input id="weight-keywords" class="input" type="number" min="0" max="1" step="0.05" value="0.25">
+            </label>
+            <p class="weight-hint">权重会按比例归一化；至少一项需要大于 0。</p>
+          </div>
+        </details>
+
+        <div class="action-row">
+          <p class="status" id="status" role="status" aria-live="polite">填写档案后，可在 Cindy 中输入“热点 抖音”或“热点 快手”启动一次分析。</p>
+          <div class="actions">
+            <button class="button button-secondary" id="reset-profile" type="button">清空当前档案</button>
+            <button class="button button-secondary" id="cancel-run" type="button" hidden>取消采集</button>
+            <button class="button button-primary" id="run-ranking" type="button">采集并排序</button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel results-panel" aria-labelledby="results-title">
+      <div class="section-heading results-heading">
+        <div>
+          <h2 id="results-title">值得研究的视频</h2>
+          <p class="section-copy" id="result-count">等待采集</p>
+        </div>
+      </div>
+      <div class="summary" id="summary" hidden></div>
+      <div class="state-box" id="empty-state" role="status">
+        <p id="empty-message">选择采集环境并填写博主档案后，结果会显示在这里。</p>
+      </div>
+      <div class="results-list" id="results" hidden></div>
+      <p class="data-note">这是关键词搜索结果，不是抖音或快手全站热榜。数据是采集时的快照；缺失指标显示“不可用”，不会用其他指标推算。</p>
+    </section>
+  </main>
+</body>
+</html>
