@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "sourceType": "synthetic",
+  "game": { "game_id": "synthetic-voice-of-player", "name": "玩家声音测试场" },
+  "query": { "window": "7d", "start_date": "2026-09-28T00:00:00.000Z", "end_date": "2026-10-04T23:59:59.999Z" },
+  "reviews": [
+    { "review_id": "review-001", "game_id": "synthetic-voice-of-player", "raw_text": "新版本美术挺好的，但是打 Boss 特别卡，而且活动奖励也太抠了。", "created_at": "2026-10-01T08:00:00.000Z", "rating": 2, "game_version": null, "likes": null, "device": null, "source": "Synthetic Review", "source_url": null },
+    { "review_id": "review-002", "game_id": "synthetic-voice-of-player", "raw_text": "新手引导看不懂，第一次进副本不知道要点哪里。", "created_at": "2026-09-29T12:00:00.000Z", "rating": 2, "game_version": null, "likes": null, "device": "Synthetic Device", "source": "Synthetic Review", "source_url": null },
+    { "review_id": "review-003", "game_id": "synthetic-voice-of-player", "raw_text": "希望以后增加好友联机，一起打副本。", "created_at": "2026-09-30T03:00:00.000Z", "rating": 4, "game_version": null, "likes": null, "device": null, "source": "Synthetic Review", "source_url": null },
+    { "review_id": "review-004", "game_id": "synthetic-voice-of-player", "raw_text": "第一！", "created_at": "2026-10-02T03:00:00.000Z", "rating": 5, "game_version": null, "likes": null, "device": null, "source": "Synthetic Review", "source_url": null },
+    { "review_id": "review-005", "game_id": "synthetic-voice-of-player", "raw_text": "音乐很有氛围感，地图探索也很舒服。", "created_at": "2026-10-03T11:00:00.000Z", "rating": 5, "game_version": null, "likes": null, "device": null, "source": "Synthetic Review", "source_url": null }
+  ]
+}

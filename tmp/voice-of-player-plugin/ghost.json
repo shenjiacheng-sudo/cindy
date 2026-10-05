@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 3,
+  "minCindyVersion": "0.1.73",
+  "id": "voice-of-player",
+  "name": "玩家声音",
+  "description": "从本地合成评论或公开 TapTap 评价页收集玩家反馈，拆分为可聚合、可追溯的反馈主题。",
+  "whenToUse": "用户想分析游戏玩家反馈、采集公开 TapTap 评价、拆分评论中的多个体验观点、聚合相似问题并查看原始评论证据时。",
+  "version": "0.1.0",
+  "kind": "chip",
+  "entry": "main.js",
+  "launch": "on-demand",
+  "command": "玩家声音",
+  "panel": { "title": "玩家声音", "position": "right", "html": "index.html", "minWidth": 360, "defaultFraction": 0.42 },
+  "tools": [
+    {
+      "name": "load_player_feedback_fixture",
+      "description": "加载本地合成玩家评论。返回结果明确标记 source_type=synthetic，不代表 TapTap 实时数据。",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "analyze_player_feedback",
+      "description": "分析本地合成玩家评论，输出 Review 数量、Feedback Item 数量、反馈主题及可追溯引用。当前不连接真实 TapTap。",
+      "parameters": {
+        "type": "object",
+        "properties": { "window": { "type": "string", "enum": ["7d"], "description": "分析窗口，当前仅支持 7d。" } }
+      }
+    },
+    {
+      "name": "get_feedback_evidence",
+      "description": "按 Feedback Item、Feedback Cluster 或 Review ID 查看原始评论和证据片段。",
+      "parameters": {
+        "type": "object",
+        "properties": { "reference": { "type": "string", "minLength": 1, "maxLength": 160 } },
+        "required": ["reference"]
+      }
+    },
+    {
+      "name": "collect_public_reviews",
+      "description": "从公开 TapTap 评价页采集评论并保存为插件私有 JSON。默认采集《伊瑟》app_id=236627；不需要开发者账号，不绕过登录、验证码或频控。返回的评论明确标记 source_type=public。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "app_id": { "type": "string", "pattern": "^[0-9]{1,32}$", "description": "TapTap 公开游戏页面 ID，默认 236627。" },
+          "page_size": { "type": "integer", "minimum": 1, "maximum": 20, "description": "每页评论数，默认 10。" },
+          "max_pages": { "type": "integer", "minimum": 1, "maximum": 10, "description": "最多采集页数，默认 1。" }
+        }
+      }
+    }
+  ],
+  "network": { "hosts": ["www.taptap.cn"] },
+  "fs": true,
+  "node": { "entry": "node/worker.cjs", "protocol": "json-rpc-stdio", "lifecycle": "on-demand", "idleTimeoutSeconds": 120 },
+  "manual": { "items": [{ "dir": "manual/voice-of-player", "name": "voice-of-player", "description": "玩家声音本地合成数据体验版的使用边界、数据模型、证据追溯与 Evaluation 说明。" }] }
+}

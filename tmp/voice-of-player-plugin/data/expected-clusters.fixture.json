@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "clusters": [
+    { "cluster_id": "cluster:praise|美术|美术表现", "topic": "美术", "feedback_ids": ["feedback-001"], "review_ids": ["review-001"] },
+    { "cluster_id": "cluster:problem|boss战卡顿|boss战", "topic": "Boss 战卡顿", "feedback_ids": ["feedback-002"], "review_ids": ["review-001"] },
+    { "cluster_id": "cluster:problem|活动奖励不足|活动奖励", "topic": "活动奖励不足", "feedback_ids": ["feedback-003"], "review_ids": ["review-001"] },
+    { "cluster_id": "cluster:problem|新手引导难理解|新手引导", "topic": "新手引导难理解", "feedback_ids": ["feedback-004"], "review_ids": ["review-002"] },
+    { "cluster_id": "cluster:problem|副本入口不清晰|副本入口", "topic": "副本入口不清晰", "feedback_ids": ["feedback-005"], "review_ids": ["review-002"] },
+    { "cluster_id": "cluster:suggestion|增加好友联机|联机功能", "topic": "增加好友联机", "feedback_ids": ["feedback-006"], "review_ids": ["review-003"] },
+    { "cluster_id": "cluster:praise|音乐氛围感|音乐", "topic": "音乐氛围感", "feedback_ids": ["feedback-007"], "review_ids": ["review-005"] },
+    { "cluster_id": "cluster:praise|地图探索体验|地图探索", "topic": "地图探索体验", "feedback_ids": ["feedback-008"], "review_ids": ["review-005"] }
+  ]
+}

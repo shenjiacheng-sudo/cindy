@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "items": [
+    { "feedback_id": "feedback-001", "review_id": "review-001", "is_valid": true, "sentiment": "positive", "category": null, "topic": "美术", "target": "美术表现", "feedback_type": "praise", "severity": "low", "evidence": "新版本美术挺好的", "confidence": 0.98 },
+    { "feedback_id": "feedback-002", "review_id": "review-001", "is_valid": true, "sentiment": "negative", "category": "Bug / 功能异常", "topic": "Boss 战卡顿", "target": "Boss 战", "feedback_type": "problem", "severity": "high", "evidence": "打 Boss 特别卡", "confidence": 0.97 },
+    { "feedback_id": "feedback-003", "review_id": "review-001", "is_valid": true, "sentiment": "negative", "category": null, "topic": "活动奖励不足", "target": "活动奖励", "feedback_type": "problem", "severity": "medium", "evidence": "活动奖励也太抠了", "confidence": 0.96 },
+    { "feedback_id": "feedback-004", "review_id": "review-002", "is_valid": true, "sentiment": "negative", "category": null, "topic": "新手引导难理解", "target": "新手引导", "feedback_type": "problem", "severity": "medium", "evidence": "新手引导看不懂", "confidence": 0.95 },
+    { "feedback_id": "feedback-005", "review_id": "review-002", "is_valid": true, "sentiment": "negative", "category": null, "topic": "副本入口不清晰", "target": "副本入口", "feedback_type": "problem", "severity": "medium", "evidence": "第一次进副本不知道要点哪里", "confidence": 0.91 },
+    { "feedback_id": "feedback-006", "review_id": "review-003", "is_valid": true, "sentiment": "neutral", "category": null, "topic": "增加好友联机", "target": "联机功能", "feedback_type": "suggestion", "severity": "low", "evidence": "希望以后增加好友联机", "confidence": 0.99 },
+    { "feedback_id": "feedback-007", "review_id": "review-005", "is_valid": true, "sentiment": "positive", "category": null, "topic": "音乐氛围感", "target": "音乐", "feedback_type": "praise", "severity": "low", "evidence": "音乐很有氛围感", "confidence": 0.97 },
+    { "feedback_id": "feedback-008", "review_id": "review-005", "is_valid": true, "sentiment": "positive", "category": null, "topic": "地图探索体验", "target": "地图探索", "feedback_type": "praise", "severity": "low", "evidence": "地图探索也很舒服", "confidence": 0.96 }
+  ],
+  "invalid_review_ids": ["review-004"]
+}

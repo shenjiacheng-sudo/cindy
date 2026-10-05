@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>玩家声音</title>
+  <link rel="stylesheet" href="/panel.css">
+  <script src="/panel.js" defer></script>
+</head>
+<body>
+  <main class="app">
+    <header class="header">
+      <div><p class="eyebrow">Voice of Player V0.1</p><h1>玩家声音</h1><p class="intro">把评论拆成玩家反馈主题，并保留原评论证据。</p></div>
+      <span class="badge" id="source-badge">合成数据</span>
+    </header>
+    <section class="panel" aria-labelledby="analysis-title">
+      <div class="section-head"><div><h2 id="analysis-title">最近 7 天反馈</h2><p class="muted">可分析本地合成评论，或采集公开 TapTap 评价。</p></div><div class="actions"><button id="run" class="button primary" type="button">分析合成数据</button><label class="app-id-field">TapTap ID <input id="public-app-id" value="236627" inputmode="numeric" maxlength="32"></label><button id="collect-public" class="button" type="button">采集公开评价</button></div></div>
+      <p id="status" class="status" role="status" aria-live="polite">等待分析</p>
+      <div id="summary" class="summary" hidden></div>
+    </section>
+    <section class="panel" aria-labelledby="clusters-title"><div class="section-head"><div><h2 id="clusters-title">反馈主题</h2><p class="muted">按反馈数量排序，点击主题查看原评论。</p></div></div><div id="clusters" class="clusters"><p class="empty">点击“开始分析”。</p></div></section>
+    <section class="panel evidence-panel" aria-labelledby="evidence-title"><div class="section-head"><div><h2 id="evidence-title">原评论证据</h2><p class="muted">Evidence 必须来自原始评论。</p></div></div><div id="evidence" class="evidence"><p class="empty">选择一个反馈主题。</p></div></section>
+  </main>
+</body>
+</html>
