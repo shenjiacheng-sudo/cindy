@@ -115,6 +115,8 @@ export type RsbBrowserBridgeTabOp =
       sessionId: string;
       /** Initial URL for the new web-browser tab. */
       url?: string;
+      /** Do not activate the tab or reveal the sidebar/window. Omitted = foreground. */
+      background?: boolean;
     }
   | { op: 'focus'; sessionId: string; tabId: string }
   | { op: 'close'; sessionId: string; tabId: string }

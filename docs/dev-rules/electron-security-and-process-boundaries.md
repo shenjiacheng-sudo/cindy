@@ -50,6 +50,16 @@ Renderer 可以负责组件渲染、交互状态、表单状态、展示数据�
 
 ## 3．BrowserWindow 与 WebView
 
+内置 browser MCP 的 `open(background:true)` 复用既有 WebView pool 与独立侧边栏
+controller 的隐藏预热／READY 流程：保留当前 activeTab、折叠状态、窗口可见性和宿主
+会话，不新造窗口或生命周期。`status.data.supportsBackgroundOpen === true` 才代表
+宿主支持；外置后端拒绝该请求，不静默切后端。用户要求观看或需要人工登录验证时，
+`focus` 原 targetId 展示既有页面。缺省/false 仍沿用原 open 行为。空 activeTab 为有意
+不选择，展示投影不得自动激活后台创建的首个 tab。实现见
+`main/mcp-integrations/browser-backend/rsb-webview-backend.ts`、
+`main/right-sidebar-window/controller.ts`、`renderer/features/right-sidebar/lib/rsbBrowserBridge.ts`；
+对应目录单测覆盖隐藏创建、超时、显式展示和兼容调用。
+
 新增 `BrowserWindow` 时必须显式配置下列安全选项，不得只依赖 Electron 默认值：
 
 - `sandbox: true`

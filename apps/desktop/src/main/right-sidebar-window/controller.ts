@@ -392,26 +392,41 @@ export class RsbWindowController {
   // ── ensureOpen / context / routeCommand ─────────────────────────────
 
   /**
-   * agent tab-op(浏览器自动化)前置:detached 且窗口未就绪时先开窗并等 ready 握手。
+   * agent tab-op 前置:detached 复用既有窗口及 ready 握手。background
+   * 只准备隐藏 host，不显示窗口或改变当前宿主会话；缺省保持打开语义。
    */
-  async ensureOpenForAutomation(opts: { userInitiated?: boolean; sessionId?: string } = {}): Promise<void> {
+  async ensureOpenForAutomation(
+    opts: { userInitiated?: boolean; sessionId?: string; background?: boolean } = {},
+  ): Promise<void> {
     if (!this.deps.settings.read().detached) return;
-    this.open({
-      userInitiated: opts.userInitiated === true,
-      ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
-    });
+    if (opts.background === true) {
+      // Reuse the existing hidden prewarm/READY lifecycle. No lastOpen
+      // preference, active host context, or native visibility is changed.
+      this.prewarm();
+    } else {
+      this.open({
+        userInitiated: opts.userInitiated === true,
+        ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+      });
+    }
     if (!this.presentationReady) {
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
           const idx = this.readyWaiters.findIndex((w) => w.timeout === timeout);
           if (idx >= 0) this.readyWaiters.splice(idx, 1);
           reject(new Error(`right-sidebar window ready timeout after ${READY_TIMEOUT_MS}ms`));
-          if (opts.sessionId) this.releaseUnresolvedHostPin(opts.sessionId);
+          if (opts.sessionId && opts.background !== true)
+            this.releaseUnresolvedHostPin(opts.sessionId);
         }, READY_TIMEOUT_MS);
-        this.readyWaiters.push({ resolve, reject, timeout, sessionId: opts.sessionId });
+        this.readyWaiters.push({
+          resolve,
+          reject,
+          timeout,
+          sessionId: opts.background === true ? undefined : opts.sessionId,
+        });
       });
     }
-    if (opts.sessionId) await this.waitForHostSession(opts.sessionId);
+    if (opts.sessionId && opts.background !== true) await this.waitForHostSession(opts.sessionId);
   }
 
   /** 主窗上报渲染上下文:缓存 + 窗口活跃就转发。 */
@@ -547,6 +562,15 @@ export class RsbWindowController {
     }
     const main = this.deps.getMainWindow();
     return main && !main.isDestroyed() ? main.webContents : null;
+  }
+
+  /** Automation can address a ready hidden detached host without revealing it. */
+  getBackgroundHostWebContents(): WebContents | null {
+    if (this.deps.settings.read().detached && this.presentationReady) {
+      const sidebar = this.getSidebarWebContents();
+      if (sidebar && !sidebar.isDestroyed()) return sidebar;
+    }
+    return this.getHostWebContents();
   }
 
   /** IPC 层校验 sender 用。 */

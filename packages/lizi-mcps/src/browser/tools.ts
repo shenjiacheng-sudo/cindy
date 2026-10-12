@@ -252,6 +252,12 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
       url: z.string().optional().describe('navigate/open/wait 等操作使用的 URL'),
       targetId: z.string().optional().describe('tab 引用;优先使用 tabs/open 返回的 suggestedTargetId/tabId/label'),
       label: z.string().optional().describe('tab label'),
+      background: z
+        .boolean()
+        .optional()
+        .describe(
+          "仅 open，且仅内置浏览器支持 true：后台创建可操作标签页，不激活、不展开侧边栏或显示独立窗口。省略/false 保持原行为；用户要求观看时 focus 同一 targetId",
+        ),
       limit: z.number().int().positive().optional(),
       maxChars: z.number().int().nonnegative().optional(),
       mode: z.enum(['efficient']).optional(),
@@ -337,6 +343,9 @@ export function registerBrowserTools(registry: BrowserToolRegistry, deps: Browse
     },
     handler: async (args) => {
       try {
+        if (args.background !== undefined && args.action !== 'open') {
+          return errorResult(args.action, 'background 仅用于 open；其他操作请省略该字段');
+        }
         // Host configuration is not a vendored browser action. Await the same
         // lifecycle transition as Settings before issuing any new page actions.
         if (args.action === 'setBackend') {

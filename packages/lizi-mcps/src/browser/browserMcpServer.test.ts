@@ -42,9 +42,42 @@ async function makeHarness(
   };
 }
 
-describe('createBrowserMcpServer', () => {
-  it('switches modes in the same MCP instance and immediately updates backend capabilities', async () => {
-    let backend: 'external' | 'rsb-webview' = 'external';
+describe("createBrowserMcpServer", () => {
+  it("forwards background open and rejects the option on other actions", async () => {
+    const h = await makeHarness();
+    try {
+      const call = (args: Record<string, unknown>) =>
+        h.client.callTool({
+          name: "call_tool",
+          arguments: { name: "browser", args },
+        });
+      const opened = await call({
+        action: "open",
+        background: true,
+        url: "https://example.test",
+      });
+      expect(opened.isError).not.toBe(true);
+      expect(h.calls).toEqual([
+        { action: "open", background: true, url: "https://example.test" },
+      ]);
+      for (const background of [true, false, "true"]) {
+        expect(
+          (
+            await call({
+              action: "navigate",
+              background,
+              url: "https://example.test",
+            })
+          ).isError,
+        ).toBe(true);
+      }
+      expect(h.calls).toHaveLength(1);
+    } finally {
+      await h.cleanup();
+    }
+  });
+  it("switches modes in the same MCP instance and immediately updates backend capabilities", async () => {
+    let backend: "external" | "rsb-webview" = "external";
     const switched: string[] = [];
     const h = await makeHarness({
       setBackend: async (next) => { switched.push(next); backend = next; return backend; },
@@ -75,6 +108,7 @@ describe('createBrowserMcpServer', () => {
   it.each([
     { action: 'setBackend' },
     { action: 'setBackend', backend: 'chrome' },
+    { action: 'setBackend', backend: 'rsb-webview', background: true },
     { action: 'open', backend: 'rsb-webview', url: 'https://example.test/' },
   ])('rejects invalid mode arguments without navigation or switching: %j', async (args) => {
     let switches = 0;

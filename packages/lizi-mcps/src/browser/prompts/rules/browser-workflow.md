@@ -27,6 +27,7 @@
    - 打开重要页面用 `action: "open"` 时带上 `label`(如 `label: "checkout"`),后续靠 label 复用。
    - `targetId` 优先用 `tabs` / `open` 返回的 `suggestedTargetId` / `tabId` / `label`,**不要**把裸序号(`"2"`)当 `targetId` 传。
    - 开新页前先 `tabs`;按 label 或 URL 命中已有页就复用,不重复开。
+   - 用户或所选工作流要求后台运行时，先核对 `status.data.backend === "rsb-webview"` 且 `status.data.supportsBackgroundOpen === true`，新页用 `open` + `background:true`。它创建可操作网页但不激活标签、不展开侧边栏、不显示隐藏独立窗口；省略或 false 保持原行为。缺少能力时停止并说明需更新宿主，不能默默改成前台开页；外置后端不支持 true。后续显式带 targetId，正常研究不 focus；用户要求观看或需人工登录/验证时 focus 同一 targetId，不另开页、不重做查询，也不擅自关闭用户正在看的页面。
 
 3. **先读后点(snapshot → ref)**
    - 点击 / 输入前先 `action: "snapshot"`(同一个 `targetId`,`refs: "aria"`)拿到页面结构和元素 `ref`。

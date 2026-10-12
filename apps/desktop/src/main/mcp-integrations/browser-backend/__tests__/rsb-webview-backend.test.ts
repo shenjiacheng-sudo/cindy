@@ -287,6 +287,33 @@ describe('RsbWebviewBackend — tabs', () => {
 });
 
 describe('RsbWebviewBackend — open / focus / close (renderer bridge)', () => {
+  it('advertises and forwards background opening in the owning session', async () => {
+    dispatchTabOpSpy.mockResolvedValueOnce({ reqId: 'background', ok: true, tabId: 'bg-tab' });
+    const backend = new RsbWebviewBackend({
+      registry: fakeRegistry([], new Map()),
+      getActiveSessionId: () => 's1',
+      bridge: { getHostWebContents: () => null, logger: logger() },
+      logger: logger(),
+    });
+    expect((await backend.call({ action: 'status' })).data).toMatchObject({
+      supportsBackgroundOpen: true,
+    });
+    const result = await backend.call({
+      action: 'open',
+      background: true,
+      url: 'https://example.test',
+    });
+    expect(result.data).toEqual({ targetId: 'bg-tab', tabId: 'bg-tab' });
+    expect(dispatchTabOpSpy).toHaveBeenCalledWith(
+      { op: 'open', sessionId: 's1', url: 'https://example.test', background: true },
+      expect.any(Object),
+      expect.any(Function),
+    );
+    expect(
+      (await backend.call({ action: 'focus', background: true, targetId: 'bg-tab' })).errorCode,
+    ).toBe('BROWSER_RUNTIME_INVALID_REQUEST');
+    expect(dispatchTabOpSpy).toHaveBeenCalledTimes(1);
+  });
   it('open dispatches an open op and returns the new tabId', async () => {
     dispatchTabOpSpy.mockResolvedValueOnce({
       reqId: 'x',

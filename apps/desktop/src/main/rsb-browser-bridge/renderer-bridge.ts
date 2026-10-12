@@ -38,15 +38,17 @@ interface PendingRequest {
 
 export interface RendererBridgeOptions {
   /** Resolves to the host renderer to talk to; null when no main window. */
-  getHostWebContents: () => WebContents | null;
+  getHostWebContents: (options?: { background?: boolean }) => WebContents | null;
   /**
    * Optional pre-dispatch hook: awaited before resolving the host webContents.
    * Used by the detached right-sidebar window — when the user prefers the
    * sidebar in its own window but has it closed, this pops the window and
    * waits for its renderer's ready handshake so the tab-op has a live host.
+   * background:true prepares the same host hidden, without adopting a visible
+   * session; open/focus with no option retain their existing reveal behavior.
    * Rejection fails the tab-op (no host to run it against).
    */
-  ensureHost?: (sessionId?: string) => Promise<void>;
+  ensureHost?: (sessionId?: string, options?: { background?: boolean }) => Promise<void>;
   /**
    * Whether the user currently prefers the sidebar in a detached window.
    * Consumers use it to decide if a tab-resolve miss is worth waiting on
@@ -107,12 +109,16 @@ export async function dispatchTabOp(
   dispatchOptions: { ensureHost?: boolean } = {},
 ): Promise<RsbBrowserBridgeTabOpResult> {
   assertActive?.();
+  const background = (op.op === 'open' && op.background === true) || op.op === 'ensure';
   if (dispatchOptions.ensureHost !== false && opts.ensureHost) {
     const sessionId = 'sessionId' in op ? op.sessionId : undefined;
-    await opts.ensureHost(sessionId);
+    // Background opening and re-materialization prepare the existing host
+    // without showing it or changing the user-selected host session.
+    if (background) await opts.ensureHost(sessionId, { background: true });
+    else await opts.ensureHost(sessionId);
     assertActive?.();
   }
-  const wc = opts.getHostWebContents();
+  const wc = background ? opts.getHostWebContents({ background: true }) : opts.getHostWebContents();
   if (!wc || wc.isDestroyed()) {
     return Promise.reject(new Error('host renderer not available'));
   }

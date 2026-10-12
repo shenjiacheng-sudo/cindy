@@ -47,6 +47,12 @@ const DIAGNOSTIC_ACTIONS: ReadonlySet<BrowserControlAction> = new Set([
  *  Exported (pure) so the param-forwarding can be unit-tested as a regression
  *  net against future vendored re-syncs silently dropping fields. */
 export function planDispatch(req: BrowserControlRequest): DispatchPlan {
+  if (req.background !== undefined && req.action !== "open") {
+    throw new Error("background is only valid for action=open");
+  }
+  if (req.background === true) {
+    throw new Error("background opening requires the embedded browser backend");
+  }
   if (
     (req.proxyServer !== undefined || req.proxyAllowedHostnames !== undefined)
     && req.action !== 'start'

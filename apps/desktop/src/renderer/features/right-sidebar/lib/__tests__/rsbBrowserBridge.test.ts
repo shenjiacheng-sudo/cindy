@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { browserWebviewPool } from '../browserWebviewPool';
+import { onRequestRightSidebarVisibility } from '../sidebarCommands';
 import {
   _resetRsbBrowserBridgeForTests,
   consumePendingKillCause,
@@ -418,16 +419,21 @@ describe('rsbBrowserBridge — initialization & teardown', () => {
     expect(api.snapshot.mock.calls[0][0]).toEqual({ liveTabIds: ['t1', 't2'] });
   });
 
-  it('tab-op request: open eager-spawns webview + reports webContentsId BEFORE acking (cross-session race fix)', async () => {
-    const api = installFakeIpc();
-    initRsbBrowserBridge();
+  it.each([undefined, false, true])(
+    'open background=%s registers a live webview and preserves visibility intent',
+    async (background) => {
+      const api = installFakeIpc();
+      initRsbBrowserBridge();
+      await ensureHydrated('s-A');
+      const previous = await addTab('s-A', 'web-browser', { url: 'https://previous.test' });
+      const visibility = vi.fn();
+      const unsubscribe = onRequestRightSidebarVisibility(visibility);
 
-    // Spy on pool.acquire so we can intercept the returned entry and drive a
-    // synthetic dom-ready. jsdom's <webview> is a generic HTMLElement, not a
-    // real Electron guest, so we override the entry's webview methods.
-    const realAcquire = browserWebviewPool.acquire.bind(browserWebviewPool);
-    const acquireSpy = vi.spyOn(browserWebviewPool, 'acquire').mockImplementation(
-      (tabId) => {
+      // Spy on pool.acquire so we can intercept the returned entry and drive a
+      // synthetic dom-ready. jsdom's <webview> is a generic HTMLElement, not a
+      // real Electron guest, so we override the entry's webview methods.
+      const realAcquire = browserWebviewPool.acquire.bind(browserWebviewPool);
+      const acquireSpy = vi.spyOn(browserWebviewPool, 'acquire').mockImplementation((tabId) => {
         const real = realAcquire(tabId);
         // Override the webview to behave like a real Electron <webview>:
         //   - setAttribute('src') is fine on a vanilla HTMLElement, no extra
@@ -461,31 +467,60 @@ describe('rsbBrowserBridge — initialization & teardown', () => {
         });
         synthetic.getWebContentsId = () => 4242;
         return real;
-      },
-    );
+      });
 
-    api.tabOpCb?.({ reqId: 'r-open-1', op: 'open', sessionId: 's-A', url: 'https://example.test' });
+      api.tabOpCb?.({
+        reqId: 'r-open-1',
+        op: 'open',
+        sessionId: 's-A',
+        url: 'https://example.test',
+        background,
+      });
 
-    // Wait for the entire eager-spawn promise chain to settle:
-    // queueMicrotask → addEventListener → resolve → outer await → ack.
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      // Wait for the entire eager-spawn promise chain to settle:
+      // queueMicrotask → addEventListener → resolve → outer await → ack.
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
 
-    // The acquire MUST have happened (eager-spawn fired).
-    expect(acquireSpy).toHaveBeenCalled();
-    // webContentsId MUST have been reported BEFORE the ack — that's the whole
-    // point of the fix. We assert by call order on the same fake IPC.
-    expect(api.report).toHaveBeenCalledWith({
-      sessionId: 's-A',
-      tabId: expect.any(String),
-      webContentsId: 4242,
-    });
-    // And the ack went out with the tab id.
-    expect(api.tabOpResult).toHaveBeenCalledWith(
-      expect.objectContaining({ reqId: 'r-open-1', ok: true }),
-    );
+      // The acquire MUST have happened (eager-spawn fired).
+      expect(acquireSpy).toHaveBeenCalled();
+      // webContentsId MUST have been reported BEFORE the ack — that's the whole
+      // point of the fix. We assert by call order on the same fake IPC.
+      expect(api.report).toHaveBeenCalledWith({
+        sessionId: 's-A',
+        tabId: expect.any(String),
+        webContentsId: 4242,
+      });
+      // And the ack went out with the tab id.
+      expect(api.tabOpResult).toHaveBeenCalledWith(
+        expect.objectContaining({ reqId: 'r-open-1', ok: true }),
+      );
+      expect(api.report.mock.invocationCallOrder[0]).toBeLessThan(
+        api.tabOpResult.mock.invocationCallOrder[0],
+      );
+      const created = getBucket('s-A').tabs[1];
+      expect(browserWebviewPool.peek(created.id)).not.toBeNull();
+      if (background === true) {
+        expect(getBucket('s-A').activeTabId).toBe(previous.id);
+        expect(visibility).not.toHaveBeenCalled();
+        // Explicit reveal selects the SAME tab and does not create another guest.
+        api.tabOpCb?.({ reqId: 'reveal', op: 'focus', sessionId: 's-A', tabId: created.id });
+        await vi.waitFor(() =>
+          expect(visibility).toHaveBeenCalledWith('open', {
+            sessionId: 's-A',
+            userInitiated: false,
+          }),
+        );
+        expect(getBucket('s-A').activeTabId).toBe(created.id);
+        expect(acquireSpy).toHaveBeenCalledTimes(1);
+      } else {
+        expect(getBucket('s-A').activeTabId).toBe(created.id);
+        expect(visibility).toHaveBeenCalledTimes(1);
+      }
+      unsubscribe();
 
-    acquireSpy.mockRestore();
-  });
+      acquireSpy.mockRestore();
+    },
+  );
 
   it('tab-op request: close routes through store and acks with ok=false on unknown session (P3)', async () => {
     const api = installFakeIpc();

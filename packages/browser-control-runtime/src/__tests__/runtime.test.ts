@@ -12,8 +12,24 @@ describe('createUnavailableBrowserRuntime', () => {
   });
 });
 
-describe('createBrowserControlRuntime — request planning + dispatch', () => {
-  it('rejects an unknown action with INVALID_REQUEST', async () => {
+describe("createBrowserControlRuntime — request planning + dispatch", () => {
+  it("rejects background opening before dispatching to external Chrome", () => {
+    expect(() =>
+      planDispatch({
+        action: "open",
+        background: true,
+        url: "https://example.test",
+      }),
+    ).toThrow(/embedded browser/);
+    expect(
+      planDispatch({
+        action: "open",
+        background: false,
+        url: "https://example.test",
+      }),
+    ).toEqual(planDispatch({ action: "open", url: "https://example.test" }));
+  });
+  it("rejects an unknown action with INVALID_REQUEST", async () => {
     const rt = createBrowserControlRuntime();
     // Force an invalid action through the type boundary.
     const res = await rt.call({ action: 'bogus' as never });

@@ -109,6 +109,8 @@ export interface BrowserControlRequest {
   url?: string;
   targetId?: string;
   label?: string;
+  /** open only: keep the embedded tab inactive and do not reveal its host. */
+  background?: boolean;
   limit?: number;
   maxChars?: number;
   mode?: BrowserSnapshotMode;

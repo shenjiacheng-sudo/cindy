@@ -465,7 +465,9 @@ async function handleTabOpRequest(
         favicon: null,
         isAudible: false,
       };
-      const newTab = await addTab(req.sessionId, 'web-browser', initialState);
+      const newTab = await addTab(req.sessionId, 'web-browser', initialState, {
+        activate: req.background !== true,
+      });
 
       // ── Eager webview spawn ─────────────────────────────────────────────
       // The tab is now in the store, but `<webview>` only exists once
@@ -499,7 +501,9 @@ async function handleTabOpRequest(
       // switches to this session), the webview is already prepared.
       // userInitiated:false —— agent 自动化开的标签,不是用户点的:侧边栏该展开
       // 就展开,但 detached 子窗口不得抢走用户当前前台应用的焦点。
-      requestRightSidebarVisibility('open', { sessionId: req.sessionId, userInitiated: false });
+      if (req.background !== true) {
+        requestRightSidebarVisibility('open', { sessionId: req.sessionId, userInitiated: false });
+      }
       result = { reqId, ok: true, tabId: newTab.id };
     } else if (req.op === 'focus') {
       // store.setActiveTab no-ops if the id is already active (returns void on

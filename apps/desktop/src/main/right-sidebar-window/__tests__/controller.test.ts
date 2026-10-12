@@ -749,6 +749,41 @@ describe('userInitiated:false', () => {
 // ensureOpenForAutomation
 // ═══════════════════════════════════════════════════════════════════════
 describe('ensureOpenForAutomation', () => {
+  it('background detached preparation stays hidden and does not change host context or preferences', async () => {
+    const h = makeHarness({ detached: true });
+    h.controller.setContext(ctx);
+    const pending = h.controller.ensureOpenForAutomation({
+      background: true,
+      sessionId: 'background-task',
+    });
+    const win = h.windows[0];
+    markReady(h.controller, win);
+    await expect(pending).resolves.toBeUndefined();
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.showInactive).not.toHaveBeenCalled();
+    expect(win.focus).not.toHaveBeenCalled();
+    expect(h.getSettings().lastOpen).toBe(false);
+    expect(h.controller.getContext()).toBeNull(); // Hidden hosts are not a visible context.
+    expect(h.controller.getBackgroundHostWebContents()).toBe(win.webContents);
+    expect(h.controller.getHostWebContents()).toBe(h.mainWin.webContents);
+    await h.controller.ensureOpenForAutomation({ background: true });
+    expect(h.windows).toHaveLength(1);
+    h.controller.open();
+    expect(win.show).toHaveBeenCalledTimes(1);
+    expect(h.windows).toHaveLength(1);
+    expect(h.controller.getContext()).toEqual(ctx);
+  });
+
+  it('background preparation timeout rejects without showing a loading window', async () => {
+    const h = makeHarness({ detached: true });
+    const pending = h.controller.ensureOpenForAutomation({ background: true });
+    const assertion = expect(pending).rejects.toThrow(/ready timeout/);
+    await vi.advanceTimersByTimeAsync(8000);
+    await assertion;
+    expect(h.windows[0].show).not.toHaveBeenCalled();
+    expect(h.windows[0].showInactive).not.toHaveBeenCalled();
+    expect(h.getSettings().lastOpen).toBe(false);
+  });
   it('non-detached: no-op resolve', async () => {
     const h = makeHarness();
     await expect(h.controller.ensureOpenForAutomation()).resolves.toBeUndefined();

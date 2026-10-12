@@ -356,6 +356,16 @@ export class RsbWebviewBackend implements BrowserBackend {
   }
 
   private async dispatch(request: BackendRequest): Promise<BackendResult> {
+    if (
+      request.background !== undefined &&
+      (request.action !== 'open' || typeof request.background !== 'boolean')
+    ) {
+      return actionFailed(
+        request.action,
+        'background must be a boolean used only for open',
+        'BROWSER_RUNTIME_INVALID_REQUEST',
+      );
+    }
     switch (request.action) {
       case 'status':
         return this.handleStatus(request);
@@ -417,6 +427,7 @@ export class RsbWebviewBackend implements BrowserBackend {
     return actionOk(req.action, {
       ready: true,
       backend: 'rsb-webview',
+      supportsBackgroundOpen: true,
       sessionId,
       tabCount: sessionId ? this.opts.registry.listBySession(sessionId).length : 0,
     });
@@ -482,7 +493,12 @@ export class RsbWebviewBackend implements BrowserBackend {
     }
     const url = (req as { url?: string }).url;
     const result = await dispatchTabOp(
-      { op: 'open', sessionId, url },
+      {
+        op: 'open',
+        sessionId,
+        url,
+        ...(req.background !== undefined ? { background: req.background } : {}),
+      },
       this.opts.bridge,
       () => this.assertActive(),
     );

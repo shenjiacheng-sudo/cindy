@@ -31,6 +31,16 @@ const TABS_WITH_SUBAGENTS: TabState[] = [
 ];
 
 describe('iOS Simulator plugin availability', () => {
+  it('does not activate a background first tab when the selection is intentionally empty', () => {
+    const web = [TABS[2]];
+    expect(
+      projectAvailableTabs(web, null, { iosSimulatorAvailable: true, subagentsAvailable: true }),
+    ).toEqual({ tabs: web, activeTabId: null });
+    expect(
+      projectAvailableTabs(web, 'web-a', { iosSimulatorAvailable: true, subagentsAvailable: true })
+        .activeTabId,
+    ).toBe('web-a');
+  });
   it('requires an enabled plugin with the capability slot', () => {
     expect(isIOSSimulatorPluginAvailable([])).toBe(false);
     expect(isIOSSimulatorPluginAvailable([ghost('ios-simulator', false, true)])).toBe(

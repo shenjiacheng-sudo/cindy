@@ -273,15 +273,15 @@ function createRsbBackend(): RsbWebviewBackend {
       // Lazy main-window lookup. Phase 2 uses the same pattern; once the host
       // window is available the dispatch lands cleanly, before that the request
       // rejects with `host renderer not available`.
-      getHostWebContents: () => {
+      getHostWebContents: (options) => {
         // bootstrap-electron owns mainWindowRef; we read it through the public
         // helper to avoid a circular import.
-        const win = readMainWindowForBackend();
+        const win = readMainWindowForBackend(options);
         return win;
       },
       // detached 偏好开 + 侧边栏子窗口关着时,tab-op 前先把子窗口拉起来并等
       // renderer ready 握手(否则没有任何 renderer 挂着 RSB store 可执行 op)。
-      ensureHost: (sessionId) => ensureHostForBackend(sessionId),
+      ensureHost: (sessionId, options) => ensureHostForBackend(sessionId, options),
       // detached 偏好信号:直连动作解析 miss 时,只有 detached 模式才值得等
       // 子窗口 renderer 重注册 tab;内嵌模式主窗常驻,miss 即真失效,快速失败。
       isDetached: () => isDetachedForBackend(),
@@ -323,17 +323,20 @@ const browserBackendHealthService = new BrowserBackendHealthService(backendContr
  * `setMainWindowAccessorForBackend`. Without this the RsbWebviewBackend has
  * no way to reach the renderer for tab-op dispatch.
  */
-let mainWindowAccessor: () => Electron.WebContents | null = () => null;
+let mainWindowAccessor: (options?: { background?: boolean }) => Electron.WebContents | null = () =>
+  null;
 
-function readMainWindowForBackend(): Electron.WebContents | null {
-  return mainWindowAccessor();
+function readMainWindowForBackend(options?: { background?: boolean }): Electron.WebContents | null {
+  return mainWindowAccessor(options);
 }
 
 /**
  * Bootstrap hook. Called from `bootstrap-electron.ts` once `mainWindowRef` is
  * known. Idempotent re-binds are safe.
  */
-export function setMainWindowAccessorForBackend(accessor: () => Electron.WebContents | null): void {
+export function setMainWindowAccessorForBackend(
+  accessor: (options?: { background?: boolean }) => Electron.WebContents | null,
+): void {
   mainWindowAccessor = accessor;
 }
 
@@ -342,14 +345,22 @@ export function setMainWindowAccessorForBackend(accessor: () => Electron.WebCont
  * controller's `ensureOpenForAutomation`. Default no-op keeps the embedded
  * (non-detached) behavior: host is the always-alive main window.
  */
-let ensureHostForBackendImpl: (sessionId?: string) => Promise<void> = () => Promise.resolve();
+let ensureHostForBackendImpl: (
+  sessionId?: string,
+  options?: { background?: boolean },
+) => Promise<void> = () => Promise.resolve();
 
-function ensureHostForBackend(sessionId?: string): Promise<void> {
-  return ensureHostForBackendImpl(sessionId);
+function ensureHostForBackend(
+  sessionId?: string,
+  options?: { background?: boolean },
+): Promise<void> {
+  return ensureHostForBackendImpl(sessionId, options);
 }
 
 /** Bootstrap hook, same pattern as `setMainWindowAccessorForBackend`. */
-export function setEnsureHostForBackend(impl: (sessionId?: string) => Promise<void>): void {
+export function setEnsureHostForBackend(
+  impl: (sessionId?: string, options?: { background?: boolean }) => Promise<void>,
+): void {
   ensureHostForBackendImpl = impl;
 }
 

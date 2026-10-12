@@ -205,6 +205,31 @@ describe('dispatchTabOp — failure paths', () => {
 });
 
 describe('dispatchTabOp — ensureHost(detached 侧边栏子窗口)', () => {
+  it.each(['open', 'ensure'] as const)(
+    '%s prepares and addresses the hidden host without a foreground fallback',
+    async (op) => {
+      const wc = fakeWc();
+      const ensureHost = vi.fn(async () => undefined);
+      const getHostWebContents = vi.fn(() => wc as unknown as Electron.WebContents);
+      const opts = { getHostWebContents, ensureHost, logger: logger() };
+      registerTabOpResultHandler(opts);
+      const pending = dispatchTabOp(
+        op === 'open'
+          ? { op, sessionId: 's1', background: true }
+          : { op, sessionId: 's1', tabId: 't1' },
+        opts,
+      );
+      await Promise.resolve();
+      expect(ensureHost).toHaveBeenCalledWith('s1', { background: true });
+      expect(getHostWebContents).toHaveBeenCalledWith({ background: true });
+      const sent = wc.send.mock.calls[0][1] as { reqId: string };
+      getRegisteredHandler('rsb-browser-bridge:tab-op-result')?.(null, {
+        reqId: sent.reqId,
+        ok: true,
+      });
+      await expect(pending).resolves.toMatchObject({ ok: true });
+    },
+  );
   it('skips ensureHost for a side-effect-free health probe', async () => {
     const wc = fakeWc();
     const ensureHost = vi.fn(async () => undefined);

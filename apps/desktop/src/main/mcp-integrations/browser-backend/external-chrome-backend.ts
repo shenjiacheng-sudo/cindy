@@ -173,6 +173,15 @@ export class ExternalChromeBackend implements BrowserBackend {
   }
 
   async call(request: BackendRequest): Promise<BackendResult> {
+    if (request.background !== undefined && request.action !== 'open') {
+      return invalidRequest(request.action, 'background is only valid for action=open');
+    }
+    if (request.background === true) {
+      return invalidRequest(
+        request.action,
+        'background opening requires the embedded browser backend',
+      );
+    }
     if (this.quiescing && request.action !== 'stop') {
       return this.withBackendIdentity(request, {
         ok: false,

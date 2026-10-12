@@ -37,9 +37,14 @@ export function projectAvailableTabs(
   availability: RightSidebarTabAvailability,
 ): { tabs: TabState[]; activeTabId: string | null } {
   const visibleTabs = tabs.filter((tab) => !isUnavailableTab(tab, availability));
-  const visibleActiveTabId = visibleTabs.some((tab) => tab.id === activeTabId)
-    ? activeTabId
-    : (visibleTabs[0]?.id ?? null);
+  // null is an intentional absence of selection (e.g. a background-opened
+  // first tab), not a missing/unavailable active tab that needs a fallback.
+  const visibleActiveTabId =
+    activeTabId === null
+      ? null
+      : visibleTabs.some((tab) => tab.id === activeTabId)
+        ? activeTabId
+        : (visibleTabs[0]?.id ?? null);
   return { tabs: visibleTabs, activeTabId: visibleActiveTabId };
 }
 

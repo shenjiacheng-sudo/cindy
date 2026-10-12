@@ -72,6 +72,17 @@ function createHarness(initialRunning = false) {
 }
 
 describe('ExternalChromeBackend proxy lifecycle', () => {
+  it('rejects background open before probing or launching external Chrome', async () => {
+    const runtime = fakeRuntime();
+    const backend = new ExternalChromeBackend(runtime, fakeLogger());
+    const result = await backend.call({
+      action: 'open',
+      background: true,
+      url: 'https://example.test',
+    });
+    expect(result.errorCode).toBe('BROWSER_RUNTIME_INVALID_REQUEST');
+    expect(runtime.call).not.toHaveBeenCalled();
+  });
   it('reports kind = external', () => {
     expect(createHarness().backend.kind).toBe('external');
   });
