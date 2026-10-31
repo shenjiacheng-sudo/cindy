@@ -1,4 +1,5 @@
 import { SessionTaskMenu } from './SessionTaskMenu';
+import { getSessionListActivityAt } from '@cindy/maker-shared/session-activity';
 import { TaskTagMenuSection, TaskTagEditor, TaskTagDots } from '@/features/task-tags/TaskTags';
 import { Button } from '@/components/ui/button';
 /**
@@ -86,6 +87,10 @@ import { isRemoteSessionWriteBlocked } from '../lib/remoteSessionWriteGuard';
 import { Tip } from '@/components/ui/tooltip';
 import { prefetchDirtyWorktreeForRemoval } from '@/lib/worktreeRemovalWarning';
 import { useSessionAttentionKind } from '@/lib/sessionAttentionStore';
+import {
+  mergeOrcaLeadAttentionKind,
+  useOrcaLeadWorkerAttentionKind,
+} from '../lib/orcaLeadWorkerAttention';
 import { useSessionAttentionUrgency } from '../contexts/SessionAttentionUrgencyContext';
 import { useRemoteSessionScheduleInfo } from '@/features/device-link/remoteProjectsStore';
 import { useRemoteSessionActivity } from '@/features/device-link/remoteSessionActivityStore';
@@ -366,12 +371,8 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
   const canOpenTaskMenu = !navigationOnly || isSharedTaskPeer(session.deviceLinkDeviceId ?? '');
   const isPinned = session.pinnedAt != null;
   const isEmpty = isEmptyDraftSession(session);
-  // 取 userSendAt 与 updatedAt 中较新的值，兼容存量 DB 行（旧版只写 userSendAt），
-  // 与 projectGrouping/dateSessionGrouping 的排序时间轴保持一致。
-  const activityIso =
-    session.userSendAt && session.userSendAt > session.updatedAt
-      ? session.userSendAt
-      : session.updatedAt;
+  // 显示时间与列表排序共用换手时钟，旧端与存量数据沿用回退。
+  const activityIso = getSessionListActivityAt(session);
   // PR 信息(C' 期):勾选且有引用时取最新一条(prRefs 已按 lastSeenAt 降序)。
   const infoPrRef = taskInfoFields.includes('pr') ? prRefs[0] : undefined;
   const infoWorktree = useTaskInfoWorktree(session, taskInfoFields.includes('worktree'));
@@ -407,7 +408,12 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
   //
   // 额外 error 来源:定时任务未读且非成功(failed / aborted / interrupted)结局的 session ——
   // 通过 SessionAttentionUrgencyContext 由上游注入,避免误把失败的 automation 涂成 Completed。
-  const attentionKind = useSessionAttentionKind(session.id);
+  //
+  // Orca Lead 行另并入其 Worker 的出错 / 等待确认(出错 > 等待确认 > Lead 自身),
+  // 见 lib/orcaLeadWorkerAttention.ts。
+  const ownAttentionKind = useSessionAttentionKind(session.id);
+  const orcaWorkerAttentionKind = useOrcaLeadWorkerAttentionKind(session.id);
+  const attentionKind = mergeOrcaLeadAttentionKind(ownAttentionKind, orcaWorkerAttentionKind);
   const isUrgentFromContext = useSessionAttentionUrgency(session.id);
   const islandActivity = useAgentIslandActivity(session.id);
   // device-link 远程会话行:本地 attention/running 链路对被控端后台会话是盲区,状态改由
@@ -426,7 +432,10 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
     isRunning: session.deviceLinkDeviceId
       ? remoteActivity?.phase === 'running'
       : isRunning || cindyMakeActivity != null,
-    hasAttentionNotification: hasAttentionNotification || remoteSchedule?.hasUnreadRun === true,
+    hasAttentionNotification:
+      hasAttentionNotification ||
+      orcaWorkerAttentionKind !== undefined ||
+      remoteSchedule?.hasUnreadRun === true,
   });
   const leftIconRunning = sessionActivity.currentTurnActive === true;
   const rightStatusKind = resolveSidebarRightStatus(sessionActivity);
@@ -830,7 +839,7 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
   const moveToProjectSubmenu = canMoveToProject ? (
     <SessionProjectMoveSubmenu
       projectOptions={projectOptions}
-      currentWorkingDir={session.workspaceKind === 'project' ? session.workingDir : null}
+      currentSession={session}
       isDialogue={session.workspaceKind === 'dialogue'}
       onSelectProject={handleMoveToProjectSelect}
       onBrowseProject={handleMoveToProjectBrowse}
@@ -1102,8 +1111,7 @@ export const SessionItem = withSidebarNavigation<SessionItemProps>(function Sess
       )}
 
       {/* 右侧任务信息 + Archive 快捷按钮。
-          时间使用 sidebar 排序同一时间轴 session.updatedAt(scheduler 自动 fire
-          也会 bump,不用 userSendAt 避免被绑定给定时任务的会话时间冻结)。
+          时间与 sidebar 排序共用 lastActivityAt 的回退口径。
           worktree 并入任务信息复选,与 PR / 费用同一槽,不再常驻分叉图标。
           archive 快捷按钮 hover/focus 时进同一格文档流,标题 truncate 让位;
           完整菜单仍走右键。槽宽跟可见内容走:平时信息槽有多宽占多宽,「任务信息 =

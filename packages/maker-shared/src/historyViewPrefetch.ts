@@ -5,11 +5,26 @@ import { historyViewEndMs } from './historyViewHandoff.js';
 /** Recently changed tasks read ahead after a list refresh; older tasks wait to be opened. */
 export const HISTORY_PREFETCH_SESSION_LIMIT = 5;
 
+export interface HistoryPrefetchRequest { recent: boolean; targets: Set<string> }
+
+/** Recent tasks have a budget; explicit completion targets must survive that budget. */
+export function mergeHistoryPrefetchRequest(
+  previous: HistoryPrefetchRequest | undefined, targets?: ReadonlySet<string>, recent = targets === undefined,
+): HistoryPrefetchRequest {
+  return { recent: recent || previous?.recent === true, targets: new Set([...previous?.targets ?? [], ...targets ?? []]) };
+}
+
 export interface HistoryPrefetchSession {
   id: string;
   updatedAt: string;
   activeTurnStartedAt?: number | null;
   lastTurnEndedAt?: number | null;
+}
+
+/** Durable turn-end patches, rather than activity text, trigger read ahead. */
+export function historyTurnEnded(previous: { lastTurnEndedAt?: number | null }, patch: { lastTurnEndedAt?: unknown }): boolean {
+  return typeof patch.lastTurnEndedAt === 'number' && Number.isFinite(patch.lastTurnEndedAt)
+    && patch.lastTurnEndedAt > (previous.lastTurnEndedAt ?? 0);
 }
 
 /** A turn that started after the last one ended keeps writing rows without touching `updatedAt`. */
@@ -37,13 +52,14 @@ export function historyPrefetchVersion(session: HistoryPrefetchSession): string 
  */
 export function selectHistoryPrefetchSessions<S extends HistoryPrefetchSession>(
   sessions: readonly S[],
-  options: { eligible(session: S): boolean; prefetchedAt(sessionId: string): string | undefined; limit?: number },
+  options: { eligible(session: S): boolean; prefetchedAt(sessionId: string): string | undefined; limit?: number; targets?: ReadonlySet<string> },
 ): S[] {
   const rank = (session: S) => isTurnRunning(session) ? Number.POSITIVE_INFINITY : activityMs(session);
   return sessions
     .filter((session) => activityMs(session) > 0 && options.eligible(session))
     .sort((a, b) => rank(b) - rank(a) || activityMs(b) - activityMs(a))
-    .slice(0, options.limit ?? HISTORY_PREFETCH_SESSION_LIMIT)
+    .filter((session, index) => index < (options.limit ?? HISTORY_PREFETCH_SESSION_LIMIT)
+      || (options.targets?.has(session.id) && !isTurnRunning(session)))
     .filter((session) => {
       const version = historyPrefetchVersion(session);
       return version === undefined || options.prefetchedAt(session.id) !== version;
@@ -87,6 +103,7 @@ export function historySnapshotForCache<T extends HistoryMessageSource>(
   page: HistoryViewPage<T>,
   previous: HistoryViewSnapshot<T> | null | undefined,
   fits: (snapshot: HistoryViewSnapshot<T>) => boolean,
+  latestPage: HistoryViewPage<T> = page,
 ): HistoryViewSnapshot<T> | null {
   const merged = historySnapshotFromPage(page, previous);
   if (fits(merged)) return merged;
@@ -95,9 +112,9 @@ export function historySnapshotForCache<T extends HistoryMessageSource>(
   });
   const expandedOnly = withoutCollapsed(merged);
   if (fits(expandedOnly)) return expandedOnly;
-  // Removing the prefix must also restore the latest page's cursor/hasMore, so the
-  // omitted rows remain reachable online. Never slice rows out of a work range.
-  const latest = withoutCollapsed(historySnapshotFromPage(page, previous ? { ...previous, items: [] } : null));
+  // A filled gap can itself exceed the cache. Restore the original latest page
+  // and its cursor, so omitted rows stay reachable online; never slice a work range.
+  const latest = withoutCollapsed(historySnapshotFromPage(latestPage, previous ? { ...previous, items: [] } : null));
   if (fits(latest)) return latest;
   const folded = { ...latest, details: new Map<string, HistoryWorkDetailState<T>>(), expanded: new Set<string>() };
   // A latest page that cannot fit even folded must not clear the existing mirror or

@@ -1,3 +1,5 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 /**
  * piEnvironment —— pi MCP 桥 per-session 身份接线测试。
  *
@@ -15,7 +17,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PluginRegistry } from '../../maker-host/plugins/plugin-registry';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { getLiziMcpSessionContext } from '@cindy/mcps';
+import { createLiziMcpProviders, getLiziMcpSessionContext } from '@cindy/mcps';
 import { createOrcaWorkerBridgeMcpProvider } from '@cindy/orca-workflow';
 
 vi.mock('electron', () => ({
@@ -31,6 +33,7 @@ import {
   CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY,
 } from '../codexBuiltinToolPolicy.js';
 import { CINDY_MAKE_VENDOR_OPTION_KEY } from '../../../shared/cindyMakeSession.js';
+import { BOT_IM_CHANNELS_VENDOR_KEY } from '../../../shared/botImConnection.js';
 import {
   getPiExtraSpawnConfig,
   invalidatePiEnvironment,
@@ -160,6 +163,32 @@ async function readRpcText(resp: Response): Promise<unknown> {
 describe('piEnvironment per-session identity', () => {
   afterEach(async () => {
     await shutdownPiEnvironment();
+  });
+
+  it('recovers Slack binding in the existing Pi bridge while another session holds its lease', async () => {
+    let bound = false;
+    const providers = createLiziMcpProviders({ slackHook: { getBridge: () => ({
+      availability: () => ({ connected: true, bound, serverSupportsTools: true }),
+      callTool: async () => ({ ok: true as const, result: { bound } }),
+    }) } });
+    const peer = await getPiExtraSpawnConfig(providers, noopLogger(), { sessionId: 'busy-peer', workingDir: '/workspace' });
+    const config = await getPiExtraSpawnConfig(providers, noopLogger(), { sessionId: 'slack-session', workingDir: '/workspace' });
+    const server = config!.mcpBridge!.servers.find((entry) => entry.name === 'cindy_slack')!;
+    const client = new Client({ name: 'slack-recovery', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(server.url), {
+      requestInit: { headers: { Authorization: `Bearer ${config!.mcpBridge!.token}` } },
+    }));
+    try {
+      for (const next of [false, true, false]) {
+        bound = next;
+        const result = await client.callTool({ name: 'slack_status', arguments: {} });
+        expect(JSON.parse((result.content as Array<{ text: string }>)[0]!.text)).toMatchObject({ bound });
+      }
+    } finally {
+      await client.close();
+      config!.disposeSessionCtx?.();
+      peer!.disposeSessionCtx?.();
+    }
   });
 
   it('registers a pi session ctx and routes it through session + instance identity', async () => {
@@ -421,6 +450,47 @@ describe('piEnvironment per-session identity', () => {
       'custom_probe',
     ]);
     make?.disposeSessionCtx?.();
+  });
+
+  it('exposes cindy_telegram_bot only to a Session carrying a Telegram channel marker', async () => {
+    const providers = [makeProvider('cindy_telegram_bot'), makeProvider('custom_probe')];
+    const desktop = await getPiExtraSpawnConfig(providers, noopLogger(), {
+      sessionId: 'pi-desktop',
+      workingDir: '/repo',
+      vendorOptions: {},
+    });
+    expect(desktop?.mcpBridge?.servers.map((server) => server.name)).toEqual(['custom_probe']);
+    desktop?.disposeSessionCtx?.();
+
+    const lane = await getPiExtraSpawnConfig(providers, noopLogger(), {
+      sessionId: 'pi-lane',
+      workingDir: '/bots/bot/workspace',
+      vendorOptions: { telegramChatId: 'g/-100123', source: 'telegram' },
+    });
+    expect(lane?.mcpBridge?.servers.map((server) => server.name)).toEqual([
+      'cindy_telegram_bot',
+      'custom_probe',
+    ]);
+    lane?.disposeSessionCtx?.();
+
+    const canonical = await getPiExtraSpawnConfig(providers, noopLogger(), {
+      sessionId: 'pi-main',
+      workingDir: '/bots/bot/workspace',
+      vendorOptions: { [BOT_IM_CHANNELS_VENDOR_KEY]: ['telegram'] },
+    });
+    expect(canonical?.mcpBridge?.servers.map((server) => server.name)).toEqual([
+      'cindy_telegram_bot',
+      'custom_probe',
+    ]);
+    canonical?.disposeSessionCtx?.();
+
+    const feishuOnly = await getPiExtraSpawnConfig(providers, noopLogger(), {
+      sessionId: 'pi-feishu-only',
+      workingDir: '/bots/bot/workspace',
+      vendorOptions: { [BOT_IM_CHANNELS_VENDOR_KEY]: ['feishu'] },
+    });
+    expect(feishuOnly?.mcpBridge?.servers.map((server) => server.name)).toEqual(['custom_probe']);
+    feishuOnly?.disposeSessionCtx?.();
   });
 
   it('omits a stable built-in server when the frozen Bot Toolset disables it', async () => {

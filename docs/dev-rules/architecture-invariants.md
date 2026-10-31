@@ -42,6 +42,17 @@ Agent 能力归属另见 [`maker-core-and-agent-behavior.md`](maker-core-and-age
   跳成用户布局。
 - 未注册、沉睡或已抽离的面板允许保留在存档中但不渲染，重新注入／唤醒后必须原位恢复；
   不要用清理未知 `panelKind` 的方式破坏这份位置记忆。
+- 右侧栏的页签住在**页签组**里（`shared/layoutTree.ts` 的 `TAB_GROUP_IDS`）：右侧组沿用
+  `right-tabs`，左／上／下边组的 `panelKind` 是 `tab-group:<边>`，上下组与 `chat-main` 同在
+  一层 `chat-column` 纵向分割里。页签归属由 renderer 记（`tabGroups.ts`），边组 pane 在
+  组里第一次有页签时经 `ensureTabGroupPane` 插入，之后**只隐藏不删除**（组空了就按未注册
+  kind 隐藏）；根横排里包着 `chat-main` 的那块是唯一的弹性区域。
+- 边组 pane 里的 webview 宿主**不能因路由切换被卸载**：卸载即销毁 webContents，回来整页
+  重载（#8081）。离开聊天页（设置页除外）时，在聊天页出现过的边组改为**停放**
+  （`setPanelKindParked`）：pane 原位保持挂载，容器 0 宽／0 高、`aria-hidden`、不画分割线、
+  不进份额账本，树里的 `fraction` 不动、不写布局。停放不改变其它注销条件（组空了、页签
+  弹到独立窗口、整栏分离、右栏窗口状态未加载仍然注销）；从未在聊天页出现过的组不挂载。
+  停放项与解除停放后的容器必须同 key 同类型，否则 React 会重挂载。
 - 新增面板经 panel registry 注册并复用标准 pane chrome／平台顶部安全区；折叠记忆按面板
   声明的 global／per-session／none 语义处理。详细数据结构与迁移语义由上述模块顶层注释和
   测试维护。

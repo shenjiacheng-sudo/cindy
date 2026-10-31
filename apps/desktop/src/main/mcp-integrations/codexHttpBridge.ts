@@ -29,7 +29,9 @@ import {
   isSameCodexMcpSessionContext,
 } from './codexMcpThreadContextStore.js';
 import { isFrozenBuiltinPluginAllowed, isFrozenMcpServerAllowed } from './codexBuiltinToolPolicy.js';
+import { AppToolCancellation, type AppToolCallIdentity } from '../mcp-apps/toolCancellation.js';
 import { appServerIds } from '../mcp-apps/runtime.js';
+import { runTaskActionRequest } from '../maker-ipc/taskActionAuthorization.js';
 
 const SERVER_HEADER = 'Lizi_MCPS/1.0';
 const MCP_PATH_PREFIX = '/mcp/';
@@ -148,6 +150,7 @@ export interface CodexHttpBridge {
   url(serverName: string): string;
   /** Startup identity for App initialization and tools/list, never tool execution. */
   withDiscoveryContext<T>(ctx: LiziMcpSessionContext, run: () => Promise<T>): Promise<T>;
+  prepareToolCancellation(identity: AppToolCallIdentity): () => void;
   registerThreadContext(threadId: string, ctx: LiziMcpSessionContext): void;
   unregisterThreadContext(threadId: string, expectedSessionInstanceId?: string): void;
   /**
@@ -225,6 +228,7 @@ export async function startCodexHttpBridge(
     transportsByServer.set(name, new Map());
   }
   const threadContextStore = createCodexMcpThreadContextStore();
+  const toolCancellation = new AppToolCancellation();
   const discoveryContexts = new Map<string, LiziMcpSessionContext>();
   // sessionId → ctx (远端 cc 的身份通道, 经 ?session= query 路由, 见 interface 注释)。
   const sessionCtxById = new Map<string, LiziMcpSessionContext>();
@@ -237,7 +241,7 @@ export async function startCodexHttpBridge(
   const sessionTokenBySessionId = new Map<string, { token: string; generation: number }>();
   let nextTokenGeneration = 0;
 
-  const httpServer = http.createServer(async (req, res) => {
+  const httpServer = http.createServer((req, res) => runTaskActionRequest(async () => {
     res.setHeader('Server', SERVER_HEADER);
 
     try {
@@ -398,6 +402,7 @@ export async function startCodexHttpBridge(
         serverName,
         log,
         threadContextStore,
+        toolCancellation,
         discoveryContexts,
         remoteAppServer,
         appServer,
@@ -419,7 +424,7 @@ export async function startCodexHttpBridge(
         res.end(err instanceof Error ? err.message : 'Internal server error');
       }
     }
-  });
+  }));
 
   // streamable-http 是长连接 SSE 流；默认 5s keep-alive 会切断 codex 连接。
   httpServer.keepAliveTimeout = 0;
@@ -536,6 +541,13 @@ export async function startCodexHttpBridge(
       try { return await run(); }
       finally { if (discoveryContexts.get(instance) === lease) discoveryContexts.delete(instance); }
     },
+    prepareToolCancellation: (identity) => {
+      const current = () => threadContextStore.getContextForThreadId(identity.threadId);
+      const admitted = current();
+      return toolCancellation.prepare(identity, () =>
+        admitted !== undefined && current() === admitted && admitted.agentKind === 'codex' &&
+        admitted.sessionId === identity.sessionId && admitted.sessionInstanceId === identity.sessionInstanceId);
+    },
     registerThreadContext: threadContextStore.registerThreadContext,
     unregisterThreadContext: threadContextStore.unregisterThreadContext,
     registerSessionCtx: (sessionId, ctx) => {
@@ -601,6 +613,7 @@ interface DispatchOpts {
   serverName: string;
   log: Logger;
   threadContextStore: ReturnType<typeof createCodexMcpThreadContextStore>;
+  toolCancellation: AppToolCancellation;
   discoveryContexts: ReadonlyMap<string, LiziMcpSessionContext>;
   remoteBotHelper?: boolean;
   remoteAppServer?: boolean;
@@ -768,9 +781,19 @@ async function dispatchToTransport(opts: DispatchOpts): Promise<void> {
       return;
     }
     if (activeContext) {
-      await runWithLiziMcpSessionContext(activeContext, () =>
-        existing.transport.handleRequest(req, res, parsedBody),
-      );
+      const run = () => runWithLiziMcpSessionContext(activeContext, () =>
+        existing.transport.handleRequest(req, res, parsedBody));
+      const threadId = extractCodexThreadId(parsedBody);
+      if (appServer && !sessionTokenCtx && activeContext.agentKind === 'codex' &&
+        activeContext.sessionId && activeContext.sessionInstanceId && threadId) {
+        await opts.toolCancellation.run({
+          sessionId: activeContext.sessionId,
+          sessionInstanceId: activeContext.sessionInstanceId,
+          threadId,
+        }, run);
+      } else {
+        await run();
+      }
       return;
     }
     await existing.transport.handleRequest(req, res, parsedBody);

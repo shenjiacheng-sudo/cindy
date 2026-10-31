@@ -870,6 +870,15 @@ describe('device-link controller handlers', () => {
     ]);
   });
 
+  it('keeps background admission local and preserves the remote argument list', async () => {
+    const deps = makeDeps({ invoke: vi.fn().mockResolvedValue({ ok: true, result: [] }) });
+    const args = [200, 'active'];
+    await handleInvoke(deps, 'dev-2', 'local-db:sessions:list', args, { background: true });
+    expect(deps.invoke).toHaveBeenCalledWith('dev-2', 'local-db:sessions:list', args, { background: true });
+    await handleInvoke(deps, 'dev-2', 'local-db:sessions:list', args, { background: 'true' });
+    expect(deps.invoke).toHaveBeenLastCalledWith('dev-2', 'local-db:sessions:list', args);
+  });
+
   it('invoke:CHANNEL_NOT_ALLOWED → 映射 IpcError', async () => {
     const deps = makeDeps({
       invoke: vi.fn().mockResolvedValue({
@@ -984,6 +993,15 @@ describe('device-link controller handlers', () => {
     await expect(handleInvoke(deps, 'dev-2', 'maker:send', ['s', {}])).rejects.toThrowError(
       /\[DEVICE_LINK_MEDIA_TRANSFER_FAILED\]/,
     );
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  // #6530: preserve the source-access classification at the actual send boundary.
+  it('keeps attachment access guidance and does not dispatch a partial message', async () => {
+    const invoke = vi.fn();
+    const error = createIpcError('DEVICE_LINK_MEDIA_ACCESS_DENIED', 'Cannot read the source attachment.');
+    const deps = makeDeps({ invoke, rewriteOutboundMedia: vi.fn().mockRejectedValue(error) });
+    await expect(handleInvoke(deps, 'dev-2', 'maker:send', ['s', {}])).rejects.toBe(error);
     expect(invoke).not.toHaveBeenCalled();
   });
 

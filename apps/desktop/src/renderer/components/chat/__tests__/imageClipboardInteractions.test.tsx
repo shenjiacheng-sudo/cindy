@@ -113,9 +113,10 @@ describe('shared production image interactions', () => {
         expect(fileCopy).toHaveBeenCalledWith({ filePath: '/fixture/preview.png' }),
       );
       expect(toast.success).toHaveBeenCalledWith(label('chat.media.imageCopied'));
-      // The message toolbar copies Markdown text, never the image or its path.
+      // Both task and companion message toolbars expose Copy directly. It copies
+      // Markdown text, never the image or its path; the image menu stays separate.
       fireEvent.click(screen.getByRole('button', { name: label('chat.messageActionBar.copy') }));
-      expect(writeText).toHaveBeenCalledWith('![preview](/fixture/preview.png)');
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('![preview](/fixture/preview.png)'));
       expect(nativeCopy).not.toHaveBeenCalled();
     },
   );

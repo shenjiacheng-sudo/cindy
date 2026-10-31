@@ -366,13 +366,18 @@ export function pickRecommendedAgent(
     const model = findCatalogModel(provider, modelId, agent, { exact: true });
     if (model) models[agent] = model;
   }
+  const comparison = provider ? modelProtocolComparison(provider, models) : null;
+  // The catalog's official/community recommendation for this exact source wins, unless this
+  // source can only reach that engine through Cindy's local compatibility conversion.
+  const declared = Object.values(models).map(model => model.recommendedAgent).find(Boolean);
+  if (declared && candidates.includes(declared) &&
+      comparison?.forAgent(declared)?.mode !== 'compatibility') return declared;
   // Grok uses Pi by default even when the supplier speaks Responses. This is a
   // recommendation only: candidates and explicit engine overrides stay authoritative.
   if (candidates.includes('pi') && models.pi && groupOf({
     id: normalizeModelIdForClassification(modelId),
     ...(models.pi.group !== undefined ? { group: models.pi.group } : {}),
   }) === 'grok') return 'pi';
-  const comparison = provider ? modelProtocolComparison(provider, models) : null;
   const canonical = comparison?.reference;
   if (canonical) {
     const preferred =
@@ -458,6 +463,7 @@ export interface UnifiedAgentCapability extends Pick<CatalogModel, 'displayPrici
    * 事实,本包拿不到,由渲染层叠加(registry.ts 明示)。
    */
   supportsFastMode: boolean;
+  supportsUltrafastMode?: boolean;
   /** 该 (provider, agent) 下的上下文窗口(同 id 跨 agent 可不同,如 gpt-5.5 cc=1M / codex=272K)。 */
   contextWindow: number;
   /** 该窗口是否为显式声明的真实上限(`CatalogModel.contextWindowVerified`)。 */
@@ -514,6 +520,7 @@ function capabilityOf(
     ...resolveDefaultEffort(model),
     // 按目录里真实那条 id 查 Fast,避免归一命中后误报 false。
     supportsFastMode: modelSupportsFastMode(provider, model.id, agent),
+    supportsUltrafastMode: agent === 'codex' && model.supportsUltrafastMode === true,
     contextWindow: model.contextWindow,
     contextWindowVerified: model.contextWindowVerified === true,
   };

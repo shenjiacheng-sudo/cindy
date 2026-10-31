@@ -1,13 +1,15 @@
 /**
- * Regression coverage for Plugin detail sections, shared Switch wiring and interaction behavior.
+ * Regression coverage for Plugin detail sections, optional Host task settings and interaction behavior.
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  * @vitest-environment jsdom
  */
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
 import path from 'node:path';
 import type { InstalledGhost } from '../../../../shared/ghost';
+import type { PreparedPluginContribution } from '../../../../shared/pluginContributions';
 
 const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 
@@ -32,12 +34,19 @@ vi.mock('@/hooks/useConnectedSource', () => ({
 
 vi.mock('@/lib/toast', () => ({ toast: toastMocks }));
 vi.mock('@/cindy-brain/GhostSettingsWebview', () => ({
-  GhostSettingsWebview: ({ account, reloadKey }: any) => (
+  GhostSettingsWebview: ({ account, reloadKey }: { account?: ReactNode; reloadKey?: number }) => (
     <>
       {account}
       <div key={reloadKey} data-testid="ghost-settings-webview" />
     </>
   ),
+}));
+
+// The shared-quota rail observes auth; this component fixture has no auth host.
+const ownerGeneration = vi.hoisted(() => ({ value: 1 }));
+vi.mock('@/contexts/AuthContext', () => ({
+  useOptionalAuthUser: () => null,
+  useOptionalDataOwnerGeneration: () => ownerGeneration.value,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -75,7 +84,7 @@ vi.mock('react-i18next', () => ({
         'settings.ghosts.detail.openLocation': 'Open Install Location',
         'settings.ghosts.detail.expandInfoValue': `Show full ${String(options?.label ?? '')}`,
         'settings.ghosts.detail.collapseInfoValue': `Collapse ${String(options?.label ?? '')}`,
-        'settings.ghosts.detail.panelNotDocked': 'Not docked',
+        'settings.ghosts.detail.panelDismissed': 'Not docked',
         'settings.providers.openai.title': 'OpenAI',
         'settings.providers.xd.title': 'Cindy AI',
         'settings.defaults.restore': 'Restore default',
@@ -98,6 +107,7 @@ import {
   ToolsSection,
 } from '../GhostPluginDetailView';
 import { toGhostPluginDetail, type GhostPluginDetail } from '../lib/ghostPluginViewModel';
+import { RemotePluginReadOnlyDetail } from '../RemotePluginReadOnlyDetail';
 
 const permissions: GhostPermissionItem[] = [
   {
@@ -183,6 +193,136 @@ afterEach(() => {
 });
 
 describe('Ghost plugin detail sections', () => {
+  it('shows target shared counts without reading local personal usage for a remote installation', () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const usageSummary = vi.fn();
+    Object.assign(window.electronAPI, { ghosts: { usageSummary } });
+    render(
+      <GhostPluginDetailView
+        remote
+        ghost={{ manifest: { id: detail.ghostId }, enabled: true } as InstalledGhost}
+        detail={detail}
+        marketItem={
+          {
+            sourceType: 'server',
+            scope: 'organization',
+            downloadStatistics: { requestCount: '1284' },
+          } as import('../../../../shared/pluginMarket').PluginMarketItem
+        }
+        panelStatus={null}
+        onBack={vi.fn()}
+        onToggle={vi.fn()}
+        onUse={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
+        onUninstall={vi.fn()}
+        toggleDisabled={false}
+      />,
+    );
+    expect(screen.getByText('1,284 settings.ghosts.usage.downloadsValue')).toBeTruthy();
+    expect(screen.queryByText('settings.ghosts.usage.title')).toBeNull();
+    expect(usageSummary).not.toHaveBeenCalled();
+  });
+
+  it('keeps unknown older-Host details honest and renders no local configuration or file actions', () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const { container } = render(<RemotePluginReadOnlyDetail
+      detail={{ id: '_ns__team__notes', name: 'Team notes', description: 'Installed on A' }}
+      notice={<p>Read only on A</p>} loading={false} failed={false} online
+      onBack={vi.fn()} onRetry={vi.fn()}
+    />);
+    expect(screen.getByRole('heading', { name: 'Team notes' })).toBeTruthy();
+    expect(screen.getByText('_ns__team__notes')).toBeTruthy();
+    expect(screen.getByText('settings.ghosts.remote.detailUnavailable')).toBeTruthy();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.queryByText('settings.ghosts.detail.configurationTitle')).toBeNull();
+    expect(screen.queryByLabelText('Open Install Location')).toBeNull();
+    expect(container.textContent).not.toMatch(/undefined|unverified|已停用|Disabled/);
+  });
+  it('renders Host permission descriptions through the existing permission dialog and disables retry offline', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    render(<RemotePluginReadOnlyDetail
+      detail={{ id: 'notes', name: 'Notes', description: '', permissions: [{ title: 'Read service', description: 'Only the declared service' }] }}
+      notice={<p>Offline</p>} loading={false} failed online={false}
+      onBack={vi.fn()} onRetry={vi.fn()}
+    />);
+    expect((screen.getByRole('button', { name: 'settings.ghosts.remote.refreshDetail' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Permissions: Read service' }));
+    expect(within(await screen.findByRole('dialog')).getByText('Only the declared service')).toBeTruthy();
+  });
+  it('keeps installed use details focused on the plugin without a version and publishing section', () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    render(<GhostPluginDetailView ghost={null} detail={{ ...detail, releaseNotes: 'Only version changes', tools: [{ name: 'example', description: 'Example tool' }] }} panelStatus={null}
+      onBack={vi.fn()} onToggle={vi.fn()} onUse={vi.fn()} onUpdate={vi.fn()} onUpdateFromFile={vi.fn()}
+      onUninstall={vi.fn()} toggleDisabled={false} />);
+    expect(screen.getByText(detail.description)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Tools' })).toBeTruthy();
+    expect(screen.queryByText('settings.ghosts.contribution.versionUpdates')).toBeNull();
+    expect(screen.queryByText('Only version changes')).toBeNull();
+  });
+
+
+  it.each(['pending', 'approved', 'rejected', 'cancelled'] as const)(
+    'hides a submission that cannot be repeated for the %s version without showing publishing details', (status) => {
+      vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+      const publish = vi.fn();
+      const preview: PreparedPluginContribution = {
+        preparedId: 'preview', instanceId: 'instance', pluginId: 'plugin', ghostId: 'example',
+        name: detail.name, description: detail.description, version: '1.0.0', sha256: 'a'.repeat(64),
+        sizeBytes: 100, releaseNotes: 'Complete package release notes', expiresAt: '2026-10-16T00:00:00.000Z',
+        preflight: {
+          subject: { authority: 'https://auth.example', membershipId: 'member' },
+          queriedAt: '2026-10-16T00:00:00.000Z', policyVersion: 2,
+          target: { pluginId: 'plugin', ghostId: 'example', version: '1.0.0', expectedRelease: null },
+          pendingRelease: status === 'pending' ? { releaseId: 'release', version: '1.0.0' } : null,
+          blockers: [{ code: 'VERSION_ALREADY_SUBMITTED', message: 'Change the version before publishing again' }],
+          actions: { canSubmit: false },
+        },
+      };
+      const view = (prepared: PreparedPluginContribution) => <GhostPluginDetailView
+        ghost={null} detail={detail} panelStatus={null} onBack={vi.fn()} onToggle={vi.fn()} onUse={vi.fn()}
+        onUpdate={vi.fn()} onUpdateFromFile={vi.fn()} onUninstall={vi.fn()} toggleDisabled={false}
+        onContribute={publish} publishingPreview={prepared}
+        contributionUnavailableReason={prepared.preflight?.actions.canSubmit ? undefined : 'Change the version before publishing again'} />;
+      const { rerender } = render(view(preview));
+      expect(screen.queryByRole('button', { name: 'settings.ghosts.contribution.publishPlugin' })).toBeNull();
+      expect(screen.queryByText('settings.ghosts.contribution.versionUpdates')).toBeNull();
+      expect(screen.queryByText('Change the version before publishing again')).toBeNull();
+      expect(screen.queryByText('settings.ghosts.contribution.versionConsumedHint')).toBeNull();
+      expect(screen.queryByText('Complete package release notes')).toBeNull();
+      expect(publish).not.toHaveBeenCalled();
+      // A previous cancelled/rejected/approved result does not hide a new eligible version.
+      rerender(view({ ...preview, version: '1.1.0', preflight: { ...preview.preflight!, target: { ...preview.preflight!.target, version: '1.1.0' }, pendingRelease: null, blockers: [], actions: { canSubmit: true } } }));
+      const submit = screen.getByRole('button', { name: 'settings.ghosts.contribution.publishPlugin' });
+      expect(submit).toHaveProperty('disabled', false);
+      fireEvent.click(submit);
+      expect(publish).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps the local publishing entry in the use header without a publishing section', () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const publish = vi.fn();
+    render(<GhostPluginDetailView ghost={null} detail={detail} panelStatus={null}
+      onBack={vi.fn()} onToggle={vi.fn()} onUse={vi.fn()} onUpdate={vi.fn()}
+      onUpdateFromFile={vi.fn()} onUninstall={vi.fn()} toggleDisabled={false}
+      onContribute={publish} />);
+    expect(screen.queryByText('settings.ghosts.contribution.versionUpdates')).toBeNull();
+    expect(screen.getByRole('button', { name: 'settings.ghosts.contribution.publishPlugin' }).closest('header')).toBeTruthy();
+    const chat = screen.getByRole('button', { name: 'settings.ghosts.detail.chatAction' });
+    expect(within(chat.closest('.plugin-detail-actions') as HTMLElement).getByRole('switch')).toBeTruthy();
+    expect(screen.getByText('Example plugin')).toBeTruthy();
+    const action = screen.getByRole('button', { name: 'settings.ghosts.contribution.publishPlugin' });
+    fireEvent.click(action);
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
   it('does not advertise host login for a locally imported unverified GitHub plugin', () => {
     vi.stubGlobal(
       'ResizeObserver',
@@ -197,7 +337,7 @@ describe('Ghost plugin detail sections', () => {
     render(
       <GhostPluginDetailView
         ghost={
-          { manifest: { id: 'cindy-github' }, enabled: true, trust: { level: 'unverified' } } as any
+          { manifest: { id: 'cindy-github' }, enabled: true, trust: { level: 'unverified' } } as InstalledGhost
         }
         detail={{ ...detail, id: 'cindy-github', ghostId: 'cindy-github', hasSettingsUi: true }}
         panelStatus={null}
@@ -302,6 +442,20 @@ describe('Ghost plugin detail sections', () => {
     rerender(view(true));
     expect(screen.queryByRole('button', { name: 'settings.ghosts.perm.agentTasksRequest' })).toBeNull();
   });
+  // unit: a declined first-use observe prompt is not retried by the plugin; this Host button is the only re-approval path.
+  it('offers a separate observe permission retry that requests only observe', () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+    const requestTaskApproval = vi.fn(async () => ({ granted: false }));
+    Object.assign(window.electronAPI, { ghosts: { requestTaskApproval } });
+    const ghost = { manifest: { agent: { observe: true } }, enabled: true } as InstalledGhost;
+    const view = (approved = false) => <GhostPluginDetailView ghost={{ ...ghost, ...(approved ? { observeCapabilityApproved: true as const } : {}) }} detail={detail} panelStatus="Docked" onBack={vi.fn()} onToggle={vi.fn()} onUse={vi.fn()} onUpdate={vi.fn()} onUpdateFromFile={vi.fn()} onUninstall={vi.fn()} toggleDisabled={false} />;
+    const { rerender } = render(view());
+    expect(screen.queryByRole('button', { name: 'settings.ghosts.perm.agentTasksRequest' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'settings.ghosts.perm.agentObserveRequest' }));
+    expect(requestTaskApproval).toHaveBeenCalledWith(detail.id, 'observe');
+    rerender(view(true));
+    expect(screen.queryByRole('button', { name: 'settings.ghosts.perm.agentObserveRequest' })).toBeNull();
+  });
   it('uses the shared Cindy Switch for the plugin enabled control', () => {
     vi.stubGlobal(
       'ResizeObserver',
@@ -344,6 +498,30 @@ describe('Ghost plugin detail sections', () => {
     fireEvent.click(toggle);
     fireEvent.click(screen.getByText('settings.ghosts.detail.enabledLabel'));
     expect(onToggle).toHaveBeenCalledTimes(2);
+  });
+
+  it('renders a remote disabled notice without a configuration heading or local settings', () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+    render(
+      <GhostPluginDetailView
+        remote
+        remoteConfiguration={<p>Enable this plugin before configuring.</p>}
+        ghost={null}
+        detail={{ ...detail, enabled: false, hasSettingsUi: true }}
+        panelStatus={null}
+        onBack={vi.fn()}
+        onToggle={vi.fn()}
+        onUse={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
+        onUninstall={vi.fn()}
+        toggleDisabled={false}
+      />,
+    );
+
+    expect(screen.getByText('Enable this plugin before configuring.')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'settings.ghosts.detail.configurationTitle' })).toBeNull();
+    expect(screen.queryByTestId('ghost-settings-webview')).toBeNull();
   });
 
   it('shows the main-view preference alongside the plugin settings UI', () => {
@@ -524,7 +702,7 @@ describe('Ghost plugin detail sections', () => {
     expect(topBarFrame?.className).toContain('max-w-[824px]');
     expect(backButton?.className).toContain('-ml-3');
     expect(detailHero?.className).toContain('grid-cols-[64px_minmax(0,1fr)_auto]');
-    expect(detailActions?.className).toContain('flex-nowrap');
+    expect(detailActions?.className).toContain('flex-wrap');
   });
 
   it('routes a projected detail icon failure to market recovery', () => {
@@ -852,9 +1030,16 @@ describe('Ghost plugin detail sections', () => {
   });
 
   it.each([
-    { name: 'quick answers only', manifest: { cindy: { text: ['oneshot'] } }, taskRows: false },
-    { name: 'plugin tasks', manifest: { agent: { tasks: true } }, taskRows: true },
-  ])('shows one model field for $name and no per-ability model card', ({ manifest, taskRows }) => {
+    { name: 'quick answers only', manifest: { cindy: { text: ['oneshot'] } }, taskRows: false, showCard: true },
+    { name: 'plugin tasks', manifest: { agent: { tasks: true } }, taskRows: true, showCard: true },
+    { name: 'legacy errands', manifest: { agent: { errand: true } }, taskRows: true, showCard: true },
+    { name: 'workspaces', manifest: { workspace: true }, taskRows: true, showCard: true },
+    { name: 'explicitly enabled tasks', manifest: { agent: { tasks: true }, showTaskPreferences: true }, taskRows: true, showCard: true },
+    { name: 'opted-out tasks', manifest: { agent: { tasks: true }, showTaskPreferences: false }, taskRows: true, showCard: false },
+    { name: 'opted-out quick answers', manifest: { cindy: { text: ['oneshot'] }, showTaskPreferences: false }, taskRows: false, showCard: false },
+    { name: 'opted-out legacy errands', manifest: { agent: { errand: true }, showTaskPreferences: false }, taskRows: true, showCard: false },
+    { name: 'opted-out workspaces', manifest: { workspace: true, showTaskPreferences: false }, taskRows: true, showCard: false },
+  ])('respects Host task card visibility for $name', ({ manifest, taskRows, showCard }) => {
     vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
     Object.assign(window.electronAPI, {
       ghosts: {
@@ -877,7 +1062,7 @@ describe('Ghost plugin detail sections', () => {
       trust: detail.trust,
     };
     const projected = toGhostPluginDetail(ghost);
-    expect(projected).toMatchObject({ hasTaskPreferences: true, hasPluginTasks: taskRows });
+    expect(projected).toMatchObject({ hasTaskPreferences: showCard, hasPluginTasks: taskRows });
     render(
       <GhostPluginDetailView
         ghost={ghost}
@@ -892,8 +1077,15 @@ describe('Ghost plugin detail sections', () => {
         toggleDisabled={false}
       />,
     );
-    expect(screen.getByText('settings.ghosts.detail.errandPrefs.title')).toBeTruthy();
     expect(screen.queryByText('settings.ghosts.detail.cindyPrefs.title')).toBeNull();
+    if (!showCard) {
+      expect(screen.queryByText('settings.ghosts.detail.errandPrefs.title')).toBeNull();
+      expect(screen.queryByText('settings.ghosts.detail.errandPrefs.model')).toBeNull();
+      expect(screen.queryByText('settings.ghosts.detail.errandPrefs.permission')).toBeNull();
+      expect(screen.queryByText('settings.ghosts.detail.errandPrefs.workdir')).toBeNull();
+      return;
+    }
+    expect(screen.getByText('settings.ghosts.detail.errandPrefs.title')).toBeTruthy();
     expect(screen.getAllByText('settings.ghosts.detail.errandPrefs.model')).toHaveLength(1);
     expect(screen.getByText(`settings.ghosts.detail.errandPrefs.${taskRows ? 'desc' : 'descModelOnly'}`)).toBeTruthy();
     expect(Boolean(screen.queryByText('settings.ghosts.detail.errandPrefs.permission'))).toBe(taskRows);
@@ -905,6 +1097,7 @@ describe('Ghost plugin detail sections', () => {
       manifest: {
         schemaVersion: 3, minCindyVersion: '0.1.0', kind: 'chip', id: 'art', name: 'Art',
         version: '1.0.0', entry: 'main.js', cindy: { image: ['generate', 'edit'], embed: ['text'] },
+        showTaskPreferences: true,
       },
       dir: '/plugins/art',
       namespace: null,
@@ -1113,4 +1306,102 @@ it('adds shared counts to installed detail metadata while preserving author and 
   expect(container.textContent).toContain('By Cindy·v1.7.5');
   expect(container.textContent).toContain('1,284 settings.ghosts.usage.downloadsValue');
   expect(container.textContent).toContain('8,932 settings.ghosts.usage.usesValue');
+});
+
+// Chat files handed to a plugin: the user sees each 7-day copy and deletes one
+// only after confirming. Rule: plugin-security-and-authoring.md §4 handoff.
+// Gap: new local section. Tier: renderer unit with the shared confirm dialog.
+it('deletes one handed-over file only after confirmation', async () => {
+  const { ConfirmDialogProvider } = await import('@/components/ui/confirm-dialog-provider');
+  const { GhostHandoffFilesSection } = await import('../GhostHandoffFilesSection');
+  const file = (name: string, n: number) => ({ ref: `handoff:0000000${n}-0000-4000-8000-000000000000`, name, mimeType: 'text/csv', size: 2048, sha256: 'a'.repeat(64), createdAt: 1, expiresAt: 2 });
+  const [first, second] = [file('first.csv', 1), file('second.csv', 2)];
+  const handoffList = vi.fn().mockResolvedValueOnce([first, second]).mockResolvedValue([second]);
+  const handoffDelete = vi.fn(async () => ({ existed: true }));
+  Object.assign(window.electronAPI, { ghosts: { handoffList, handoffDelete, handoffFolder: vi.fn(async () => null) } });
+  render(<ConfirmDialogProvider><GhostHandoffFilesSection ghostId="art" declared /></ConfirmDialogProvider>);
+
+  const row = (await screen.findByText('first.csv')).closest('li') as HTMLElement;
+  fireEvent.click(within(row).getByRole('button'));
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'settings.ghosts.handoff.cancel' }));
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+  expect(handoffDelete).not.toHaveBeenCalled();
+
+  fireEvent.click(within(row).getByRole('button'));
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'settings.ghosts.handoff.delete' }));
+  await waitFor(() => expect(screen.queryByText('first.csv')).toBeNull());
+  expect(handoffDelete).toHaveBeenCalledExactlyOnceWith('art', first.ref);
+  expect(screen.getByText('second.csv')).toBeTruthy();
+});
+
+// Copies are account data: an account switch with the same instance id reloads the list.
+it('reloads handed-over files when the data owner changes', async () => {
+  const { ConfirmDialogProvider } = await import('@/components/ui/confirm-dialog-provider');
+  const { GhostHandoffFilesSection } = await import('../GhostHandoffFilesSection');
+  const file = (name: string) => ({ ref: 'handoff:00000000-0000-4000-8000-000000000009', name, mimeType: 'text/csv', size: 1, sha256: 'a'.repeat(64), createdAt: 1, expiresAt: 2 });
+  const handoffList = vi.fn().mockResolvedValueOnce([file('owner-a.csv')]).mockResolvedValue([file('owner-b.csv')]);
+  Object.assign(window.electronAPI, { ghosts: { handoffList, handoffDelete: vi.fn(), handoffFolder: vi.fn(async () => null) } });
+  const view = (
+    <ConfirmDialogProvider><GhostHandoffFilesSection ghostId="art" declared /></ConfirmDialogProvider>
+  );
+  ownerGeneration.value = 1;
+  const { rerender } = render(view);
+  await screen.findByText('owner-a.csv');
+  ownerGeneration.value = 2;
+  rerender(<ConfirmDialogProvider><GhostHandoffFilesSection ghostId="art" declared /></ConfirmDialogProvider>);
+  await screen.findByText('owner-b.csv');
+  expect(screen.queryByText('owner-a.csv')).toBeNull();
+});
+
+// The user can see the copies in Finder / Explorer; with nothing handed over the
+// folder button stays unavailable. Tier: renderer unit through the real section.
+it('opens the instance handoff folder only once a copy exists', async () => {
+  const { ConfirmDialogProvider } = await import('@/components/ui/confirm-dialog-provider');
+  const { GhostHandoffFilesSection } = await import('../GhostHandoffFilesSection');
+  const copy = { ref: 'handoff:00000000-0000-4000-8000-000000000003', name: 'sales.csv', mimeType: 'text/csv', size: 1, sha256: 'a'.repeat(64), createdAt: 1, expiresAt: 2 };
+  const handoffList = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([copy]);
+  const handoffFolder = vi.fn(async () => '/data/ghost-handoff/art');
+  const openPath = vi.fn().mockResolvedValue({ success: true });
+  Object.assign(window.electronAPI, { openPath, ghosts: { handoffList, handoffDelete: vi.fn(), handoffFolder } });
+  render(<ConfirmDialogProvider><GhostHandoffFilesSection ghostId="art" declared /></ConfirmDialogProvider>);
+
+  await screen.findByText('settings.ghosts.handoff.empty');
+  const open = screen.getByRole('button', { name: /settings\.ghosts\.handoff\.openIn/ });
+  expect(open).toHaveProperty('disabled', true);
+
+  fireEvent.click(screen.getByRole('button', { name: 'settings.ghosts.handoff.refresh' }));
+  await screen.findByText('sales.csv');
+  expect(open).toHaveProperty('disabled', false);
+  fireEvent.click(open);
+  expect(openPath).toHaveBeenCalledExactlyOnceWith('/data/ghost-handoff/art');
+  expect(handoffFolder).toHaveBeenCalledWith('art');
+});
+
+// Codex 4431547660: a delete that finishes after switching plugins must not show
+// the previous plugin's files or folder. Tier: renderer unit, same mounted section.
+it('ignores the refresh of a delete that finishes after switching plugins', async () => {
+  const { ConfirmDialogProvider } = await import('@/components/ui/confirm-dialog-provider');
+  const { GhostHandoffFilesSection } = await import('../GhostHandoffFilesSection');
+  const copy = (id: string) => ({ ref: 'handoff:00000000-0000-4000-8000-000000000004', name: `${id}.csv`, mimeType: 'text/csv', size: 1, sha256: 'a'.repeat(64), createdAt: 1, expiresAt: 2 });
+  let finishDelete!: () => void;
+  const handoffDelete = vi.fn(() => new Promise<{ existed: boolean }>((resolve) => { finishDelete = () => resolve({ existed: true }); }));
+  const handoffList = vi.fn(async (id: string) => [copy(id)]);
+  const handoffFolder = vi.fn(async (id: string) => `/data/ghost-handoff/${id}`);
+  Object.assign(window.electronAPI, { ghosts: { handoffList, handoffDelete, handoffFolder } });
+  const view = (id: string) => <ConfirmDialogProvider><GhostHandoffFilesSection ghostId={id} declared /></ConfirmDialogProvider>;
+  const { rerender } = render(view('plugin-a'));
+
+  const row = (await screen.findByText('plugin-a.csv')).closest('li') as HTMLElement;
+  fireEvent.click(within(row).getByRole('button'));
+  fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'settings.ghosts.handoff.delete' }));
+  await waitFor(() => expect(handoffDelete).toHaveBeenCalledOnce());
+  rerender(view('plugin-b'));
+  await screen.findByText('plugin-b.csv');
+  finishDelete();
+  await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(screen.queryByText('plugin-a.csv')).toBeNull();
+  expect(screen.getByText('plugin-b.csv')).toBeTruthy();
+  expect(handoffList.mock.calls.map(([id]) => id)).toEqual(['plugin-a', 'plugin-b']);
 });

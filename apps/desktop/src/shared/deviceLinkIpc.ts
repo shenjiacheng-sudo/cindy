@@ -120,6 +120,7 @@ export type DeviceLinkStatus = 'stopped' | 'connecting' | 'online';
 /** 连接问题分类(同 @cindy/device-link 的 DeviceLinkConnectionIssueKind) */
 export type DeviceLinkConnectionIssueKind =
   | 'auth-failed'
+  | 'device-removed'
   | 'replaced'
   | 'too-many-connections'
   | 'version-mismatch'

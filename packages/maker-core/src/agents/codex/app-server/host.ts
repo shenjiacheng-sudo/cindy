@@ -72,6 +72,7 @@ import {
   type ItemGuardianApprovalReviewStartedNotification,
   type ItemGuardianApprovalReviewCompletedNotification,
   type GuardianWarningNotification,
+  type WarningNotification,
 } from './protocol.js';
 
 /**
@@ -103,6 +104,7 @@ const SUBSCRIBED_METHODS = [
   'item/autoApprovalReview/started',
   'item/autoApprovalReview/completed',
   'guardianWarning',
+  'warning',                         // thread 级提示 (如 WebSocket 回退到 HTTPS)
   'error',
 ] as const;
 
@@ -110,6 +112,12 @@ const NOTIFICATIONS_TO_OPT_OUT = [
   'item/plan/delta',
   'item/commandExecution/outputDelta',
   'item/fileChange/outputDelta',
+  // 以下高频通知全仓无消费方 (client 只会落一条 unhandled notification 日志, 实测合计
+  // ~2万条/天)。要消费其中任一项时, 先从这里移除再加进 SUBSCRIBED_METHODS。
+  'turn/moderationMetadata',
+  'mcpServer/startupStatus/updated',
+  'remoteControl/status/changed',
+  'item/commandExecution/terminalInteraction',
 ];
 
 const DEFAULT_THREAD_UNSUBSCRIBE_TIMEOUT_MS = 5_000;
@@ -179,6 +187,7 @@ export interface ThreadEventHandlers {
   autoApprovalReviewStarted?: (params: ItemGuardianApprovalReviewStartedNotification) => void;
   autoApprovalReviewCompleted?: (params: ItemGuardianApprovalReviewCompletedNotification) => void;
   guardianWarning?: (params: GuardianWarningNotification) => void;
+  warning?: (params: WarningNotification['params']) => void;
   error?: (params: ErrorNotification['params']) => void;
   /**
    * Host 被永久替换（强制退役，如账号切换 / auth 失效）时发给每个订阅者的结构化
@@ -245,7 +254,10 @@ export interface AppServerHostOptions {
    * 本地 codex 用 `createStdioTransport({binaryPath, cwd, env, extraArgs})`,
    * 远端 codex 用 `createSshDaemonTransport({remoteHost, ...})` (P2)。
    */
-  createTransport: () => Transport;
+  createTransport: (modelProvider?: string) => Transport;
+  /** Local proxy hosts can align the process default with their task's provider. */
+  supportsModelProviderSelection?: boolean;
+  defaultModelProviderId?: string;
   logger: Logger;
   /** initialize 时上报的客户端身份 (走 server 日志 / thread metadata)。 */
   clientInfo: ClientInfo;
@@ -346,6 +358,7 @@ export class AppServerHost {
   private readonly writerCandidates = new WeakSet<AppServerClient>();
   /** 同次 ensureStarted 并发调用共享一个 init Promise (避免重复 spawn)。 */
   private startPromise: Promise<InitializeResponse> | null = null;
+  private modelProvider: string | undefined;
   private nativeInitializationEpoch = 0;
 
   private readonly subscribers = new Map<string, ThreadEventHandlers>();
@@ -373,7 +386,17 @@ export class AppServerHost {
    * 账号配额最近一次 snapshot, 给新 subscribeThread 立即重放 — 用户打开新 codex
    * session 时不必等下次 turn 完成才看到 chip 数据。整个 host 生命周期共享一份 (账号级)。
    */
-  private lastAccountRateLimits: AccountRateLimitsUpdatedNotification['params'] | null = null;
+  private readonly lastAccountRateLimits = new Map<string, AccountRateLimitsUpdatedNotification['params']>();
+  /**
+   * 没有 limitId 的稀疏更新按「合并进最近观察到的 bucket」约定处理 (usageBroadcaster), 不能当独立
+   * bucket 去重或按插入序回放; 仅当它是最新一条时作为最后一份回放, 之后来了带 limitId 的即作废。
+   */
+  private lastIdlessAccountRateLimits: AccountRateLimitsUpdatedNotification['params'] | null = null;
+  /**
+   * 记录最近一次已 fan-out 的配额 payload (limitId + JSON), 仅用于丢弃连续重复。app-server 会以秒级间隔
+   * 重复推送内容不变的快照 (实测 ~64% 与上一条相同), 相同内容不再重复广播与记日志。
+   */
+  private lastFannedOutRateLimitsKey: string | null = null;
 
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
@@ -393,6 +416,10 @@ export class AppServerHost {
 
   isCodexProxyActive(): boolean {
     return this.opts.codexProxyActive === true;
+  }
+
+  getDefaultModelProviderId(): string | undefined {
+    return this.opts.defaultModelProviderId;
   }
 
   isCodexBrowserUseAvailable(): boolean {
@@ -652,7 +679,7 @@ export class AppServerHost {
     nativeEpoch = this.nativeInitializationEpoch,
   ): Promise<InitializeResponse> {
     const client = new AppServerClient({
-      createTransport: this.opts.createTransport,
+      createTransport: () => this.opts.createTransport(this.modelProvider),
       logger: this.opts.logger,
       onTransportError: (err) => {
         // Keep the shared startPromise while recovering this one pre-protocol
@@ -958,6 +985,18 @@ export class AppServerHost {
     );
   }
 
+  async selectModelProvider(modelProvider: string | undefined): Promise<void> {
+    if (!this.opts.supportsModelProviderSelection || this.modelProvider === modelProvider) return;
+    // Native 0.166+ compares the thread provider with the process configuration
+    // on every input. Thread overrides alone no longer select a working route.
+    // Never restart a host while another task still owns a subscription.
+    if (this.subscribers.size > 0) throw new Error('Cannot change Codex provider while threads are subscribed');
+    if (this.client || this.startPromise) {
+      await this.shutdown('Codex task model provider changed', { throwOnTransportError: true });
+    }
+    this.modelProvider = modelProvider;
+  }
+
   /**
    * 强制关停 (app.before-quit / 测试 cleanup / transport error 恢复)。幂等。
    * 清空 subscribers + close client (杀子进程)。**结束后允许 ensureStarted 重新 spawn**
@@ -1141,9 +1180,13 @@ export class AppServerHost {
     this.replayBufferedDescendantThreadStarts(threadId);
 
     // 账号配额 snapshot replay — 让新 session 立即看到当前账号配额, 不必等下次 turn。
-    if (this.lastAccountRateLimits && handlers.accountRateLimitsUpdated) {
+    if ((this.lastAccountRateLimits.size > 0 || this.lastIdlessAccountRateLimits) && handlers.accountRateLimitsUpdated) {
+      // 按 limitId 各回放最新一份: 去重后不变的快照不会再被推送, 只回放一条会让新会话缺其余 limit。
       try {
-        handlers.accountRateLimitsUpdated(this.lastAccountRateLimits);
+        for (const snapshot of this.lastAccountRateLimits.values()) {
+          handlers.accountRateLimitsUpdated(snapshot);
+        }
+        if (this.lastIdlessAccountRateLimits) handlers.accountRateLimitsUpdated(this.lastIdlessAccountRateLimits);
       } catch (e) {
         this.logger.error('accountRateLimitsUpdated replay threw', { message: (e as Error).message });
       }
@@ -1193,10 +1236,25 @@ export class AppServerHost {
     // 缓存最近 snapshot (给新 subscribe replay) + 广播给所有 active subscriber 各一份。
     if (method === 'account/rateLimits/updated') {
       const p = params as AccountRateLimitsUpdatedNotification['params'];
-      this.lastAccountRateLimits = p;
-      this.logger.info('accountRateLimits fan-out', {
+      // replay 快照始终跟随最新一条 (哪怕内容未变), 新 subscriber 拿到的与旧行为一致。
+      const limitKey = p.rateLimits?.limitId;
+      const rawJson = JSON.stringify(p.rateLimits ?? null);
+      if (limitKey) {
+        // 删后再插, 让 Map 顺序反映最近观察顺序; 带 limitId 的更新使稀疏更新的回放作废。
+        this.lastAccountRateLimits.delete(limitKey);
+        this.lastAccountRateLimits.set(limitKey, p);
+        this.lastIdlessAccountRateLimits = null;
+      } else {
+        this.lastIdlessAccountRateLimits = p;
+      }
+      // 只丢弃与上一条已广播更新完全相同的连续重复: 它不改变「最近观察的 bucket」, 下游
+      // (usageBroadcaster) 依赖这个顺序把稀疏更新合并进正确的 bucket; A,B,A 中最后的 A 不能丢。
+      const fanOutKey = `${limitKey ?? ''}\u0000${rawJson}`;
+      if (this.lastFannedOutRateLimitsKey === fanOutKey) return;
+      this.lastFannedOutRateLimitsKey = fanOutKey;
+      this.logger.debug('accountRateLimits fan-out', {
         subscribers: this.subscribers.size,
-        rawJson: JSON.stringify(p.rateLimits ?? null),
+        rawJson,
       });
       for (const handlers of this.subscribers.values()) {
         try {
@@ -1222,6 +1280,8 @@ export class AppServerHost {
         }
         return;
       }
+      // Process-level warnings (config / feature notices) have no thread to route to.
+      if (method === 'warning') return;
       this.logger.warn('notification missing threadId', { method });
       return;
     }
@@ -1642,6 +1702,7 @@ export class AppServerHost {
       case 'item/autoApprovalReview/started': fn = handlers.autoApprovalReviewStarted as (p: never) => void; break;
       case 'item/autoApprovalReview/completed': fn = handlers.autoApprovalReviewCompleted as (p: never) => void; break;
       case 'guardianWarning': fn = handlers.guardianWarning as (p: never) => void; break;
+      case 'warning': fn = handlers.warning as (p: never) => void; break;
       case 'error': fn = handlers.error as (p: never) => void; break;
     }
     if (!fn) {

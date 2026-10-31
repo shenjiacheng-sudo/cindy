@@ -12,18 +12,20 @@
  *   .row-open  { flex:1; padding:8px 10px; gap:10px }                     → px-2.5 py-2 gap-2.5(左右对称)
  *   .row-l1    { display:flex; align-items:baseline; gap:8px }            → gap-2
  *   .row-l2    { display:flex; align-items:center; gap:8px; margin-top:2px } → gap-2 + 外层 flex-col gap-0.5
- *   .row-meta  { width:40px; align-items:flex-end }                       → w-10 items-end
+ *   .row-meta  { min-width:40px; align-items:flex-end }                   → min-w-10 items-end
  *   .row-name  { font-size:14px }                                        → text-14
  *   .row-time  { font-size:11px; flex:none }                             → text-11 shrink-0
  *   .row-prev  { font-size:12.5px }                                      → text-12(仓库字号阶梯里最近的一档)
  *   .badge     { min-width:16px; height:16px; padding:0 4px; radius:9999 } → h-4 min-w-4 px-1 rounded-full
- *   .av-40     { 40px }                                                   → BotAvatar size="md"
+ *   列表头像  { 44px }                                                   → BotAvatar size="row"
  *   .side-list { padding:0 12px 12px }                                    → 容器 pl-3(伙伴段并入任务侧栏后,
  *                                                                           右侧由侧栏滚动区统一留白)
  *
  * 未读角标依用户的侧栏细化反馈收小，数字采用等宽，预览不再随未读加粗。
  * 2026-10-13 伙伴从整栏切换改为任务侧栏里的「伙伴」段(TeammatesSection):行几何不变,
  * 段头改与置顶 / 全部任务段头同款。
+ * 2026-10-29 头像几何按 DESIGN.md「Mobile task home teammate section」统一为
+ * 列表 44px / 收起 48px；本文件保留跨文件间距合同，不再锁定旧 40px 头像。
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -66,7 +68,7 @@ describe('伙伴行的间距基线', () => {
 
   it('头像与正文之间 10px', () => {
     expect(ROW_BUTTON_CLASS).toContain('gap-2.5');
-    expect(source).toContain('<BotAvatar bot={bot} size="md" />');
+    expect(source).toContain('<BotAvatar bot={bot} size="row" />');
   });
 
   it('两行之间 2px,行内元素之间 8px', () => {
@@ -86,9 +88,9 @@ describe('伙伴行的间距基线', () => {
     );
   });
 
-  it('时间与未读共用固定右列,不会被名字或预览推来推去', () => {
+  it('时间与未读共用右列,较长的相对时间不折行', () => {
     const start = source.indexOf(
-      '<span className="flex w-10 shrink-0 self-stretch flex-col items-end justify-between py-0.5">',
+      '<span className="flex min-w-10 shrink-0 self-stretch flex-col items-end justify-between whitespace-nowrap py-0.5">',
     );
     const metaColumn = source.slice(start, source.indexOf('</button>', start));
     expect(metaColumn).toContain("aria-label={t('bots.list.unread', { count: unread })}");
@@ -140,11 +142,11 @@ describe('群聊与伙伴行同一套几何', () => {
     'utf8',
   ).replace(/\r\n/g, '\n');
 
-  it('群行沿用对称的 10px / 8px 内边距、40px 头像位、14/12/11 字号', () => {
+  it('群行沿用对称的 10px / 8px 内边距、44px 头像位、14/12/11 字号', () => {
     expect(groupRow).toContain('gap-2.5 rounded-xl px-2.5 py-2 text-left');
     expect(groupRow).toContain('<span className="flex min-w-0 flex-1 flex-col gap-0.5">');
     expect(groupRow).toContain('min-w-0 truncate text-14 leading-5');
     expect(groupRow).toContain("'min-w-0 flex-1 truncate text-12 leading-4'");
-    expect(groupRow).toContain("'w-10 shrink-0 self-start pt-0.5 text-right text-11 tabular-nums'");
+    expect(groupRow).toContain("'min-w-10 shrink-0 self-start whitespace-nowrap pt-0.5 text-right text-11 tabular-nums'");
   });
 });

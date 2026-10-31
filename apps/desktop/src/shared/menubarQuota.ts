@@ -77,8 +77,16 @@ export interface MenubarSourceCell {
   reserve: boolean;
   /** Outline the tube: the source with the most room left. */
   emphasized: boolean;
+  /** A running task on this computer is drawing on this source; its liquid ripples. */
+  active: boolean;
   when: string;
   whenLevel: MenubarLevel;
+  /** Reset of the window the tube shows; consumers that outlive the build keep `when` current. */
+  resetsAtMs?: number | null;
+  /** The reading is the last one from a computer that cannot be reached now; `when` says its age. */
+  stale?: boolean;
+  /** A long window will reset with quota unused at the current pace; `whenLevel` colors the time. */
+  unusedAtReset?: boolean;
   accessibilityLabel: string;
 }
 
@@ -145,6 +153,20 @@ export interface MenubarModelUsage {
   tokens: number;
 }
 
+/** Live task/companion projection, independent of today's local usage ranking. */
+export interface MenubarActivity {
+  sessionId: string;
+  title: string;
+  logoSvg: string;
+  companion: boolean;
+  attention: boolean;
+  phase: 'running' | 'needs-interaction' | 'completed' | 'error';
+  preview: string;
+  status: string;
+  startedAtMs: number | null;
+  lastActivityAtMs: number;
+}
+
 export interface MenubarUsageScopeData {
   /** One entry per day, oldest first, aligned with `MenubarUsage.days`. */
   daily: {
@@ -187,9 +209,18 @@ export interface MenubarView {
   strings: MenubarStrings;
   /** Text after the menu bar icon for each mode; the active one is `settings.statusText`. */
   statusTextByMode: Record<MenubarStatusTextMode, string | null>;
+  /** Same attention count as Agent Island, shown before the optional usage text. */
+  attentionCount?: number;
+  activities?: MenubarActivity[];
+  /** Same active-controller predicate as the in-app connection indicator. */
+  remotelyControlled?: boolean;
+  /** Live display names from the same controller set as the in-app indicator. */
+  remoteControllerNames?: string[];
   updatedAtMs: number | null;
   headlinePrimary: string;
   headlineSecondary: string | null;
+  /** The second line is about sources running low or resetting, so it carries the warning mark. */
+  headlineAlert: boolean;
   sources: MenubarSourceCell[];
   details: Record<string, MenubarDetail>;
   taskSummary: string;
@@ -216,6 +247,7 @@ export type MenubarHelperMessage =
   | { type: 'open-session'; sessionId: string }
   | { type: 'detail-action'; sourceId: string }
   | { type: 'open-provider-settings' }
+  | { type: 'open-remote-control-settings' }
   | { type: 'settings'; patch: MenubarSettingsPatch };
 
 /** Settings → Window behavior toggle; only the local app renderer may call these. */

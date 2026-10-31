@@ -16,7 +16,7 @@ import { useSyncExternalStore } from 'react';
 
 import type { ProviderShareReceived } from '@cindy/device-link';
 
-import { getCachedDeviceProviders } from '@/hooks/useDeviceProviders';
+import { getCachedDeviceProviders, hasSubscriptionShareCatalog, isSubscriptionShareCatalogStale } from '@/hooks/useDeviceProviders';
 import { refreshRemoteCatalogSnapshot } from '@/lib/remoteCatalogSnapshot';
 import { createLogger } from '@/lib/logger';
 import { getDataOwnerGeneration, isDataOwnerGenerationCurrent } from '@/contexts/dataOwnerGeneration';
@@ -53,6 +53,7 @@ export interface ReceivedSnapshot {
 
 let receivedSnapshot: ReceivedSnapshot = { received: [], loaded: false };
 let receivedStarted = false;
+let unsubscribeCatalogPush: (() => void) | undefined;
 /** 推送序号：首次 `received` 命令晚于推送返回时，不得用旧列表覆盖。 */
 let receivedPushSeq = 0;
 const receivedSubscribers = new Set<() => void>();
@@ -72,6 +73,12 @@ function invalidateShareCatalogs(
     const deviceId = providerShareAgentDeviceId(shareId);
     // 没取过目录就没有要作废的缓存；取过的重取一次，让模型列表拿到「已不可用」。
     if (getCachedDeviceProviders(deviceId)) {
+      void refreshRemoteCatalogSnapshot(deviceId).catch(() => undefined);
+    }
+  }
+  for (const share of next) {
+    const deviceId = providerShareAgentDeviceId(share.shareId);
+    if (share.status === 'active' && isSubscriptionShareCatalogStale(deviceId)) {
       void refreshRemoteCatalogSnapshot(deviceId).catch(() => undefined);
     }
   }
@@ -136,6 +143,13 @@ export function ensureProviderShareReceivedStarted(): void {
   const api = providerShareApi();
   if (!api) return;
   receivedStarted = true;
+  unsubscribeCatalogPush = window.electronAPI?.deviceLink?.onRemotePush?.(push => {
+    if (push.channel !== 'maker:provider:changed' || !push.deviceId.startsWith('share:')) return;
+    if (!receivedSnapshot.received.some(share => providerShareAgentDeviceId(share.shareId) === push.deviceId && share.status === 'active')) return;
+    if (hasSubscriptionShareCatalog(push.deviceId)) {
+      void refreshRemoteCatalogSnapshot(push.deviceId).catch(() => undefined);
+    }
+  });
   api.onReceivedChanged((list) => {
     receivedPushSeq += 1;
     setReceived(Array.isArray(list) ? list : []);
@@ -231,9 +245,23 @@ function setPendingReshares(next: readonly ProviderSharePendingReshare[]): void 
 }
 
 /** 一份 owned 快照是本机待审批申请(含转分享请求)的权威来源：整体替换。 */
-export function publishProviderShareOwnerState(state: ProviderShareOwnerState): void {
-  setPendingReshares(state.ready ? pendingResharesFromOwned(state.shares) : []);
-  setPending(pendingRequestsFromOwnerState(state));
+export function publishProviderShareOwnerState(state: ProviderShareOwnerState, options: { hostDeviceId?: string } = {}): void {
+  // 远程管理页只把审批申请交给本机审批宿主；转分享请求仍由管理对象本机维护。
+  if (!options.hostDeviceId) setPendingReshares(state.ready ? pendingResharesFromOwned(state.shares) : []);
+  const pending = pendingRequestsFromOwnerState(state);
+  if (!options.hostDeviceId) {
+    setPending(pending);
+    return;
+  }
+  // 远程快照只覆盖这台被管理电脑，不能抹掉本机或其他被管理电脑的待审批申请。
+  // watchedRequests 属于另一台电脑的审批宿主；远程快照只发布当前被管理电脑自己的申请。
+  const remotePending = pending
+    .filter((item) => !item.hostDeviceId || item.hostDeviceId === options.hostDeviceId)
+    .map((item) => item.hostDeviceId ? item : { ...item, hostDeviceId: options.hostDeviceId });
+  setPending([
+    ...pendingRequests.filter((item) => item.hostDeviceId !== options.hostDeviceId),
+    ...remotePending,
+  ]);
 }
 
 export function getProviderSharePendingReshares(): readonly ProviderSharePendingReshare[] {
@@ -282,6 +310,42 @@ export function useProviderSharePendingRequests(): readonly ProviderSharePending
   return useSyncExternalStore(subscribePending, getProviderSharePendingRequests, getProviderSharePendingRequests);
 }
 
+// 管理页手动选中的申请也交给唯一的全局审批宿主展示，避免与迟到的自动弹窗叠在一起。
+interface ProviderShareApprovalSelection {
+  item: ProviderSharePendingRequest;
+  onClose: () => void;
+  trigger: HTMLElement | null;
+}
+let approvalSelection: ProviderShareApprovalSelection | null = null;
+const approvalSubscribers = new Set<() => void>();
+
+function setApprovalSelection(next: ProviderShareApprovalSelection | null): void {
+  approvalSelection = next;
+  for (const listener of approvalSubscribers) listener();
+}
+
+/** 页面用最新列表中的申请维护展示意图；刷新后申请消失或离开页面时撤销，不修改申请本身。 */
+export function presentProviderShareApproval(
+  item: ProviderSharePendingRequest,
+  onClose: () => void,
+  trigger: HTMLElement | null,
+): () => void {
+  const selection = { item, onClose, trigger };
+  setApprovalSelection(selection);
+  return () => { if (approvalSelection === selection) setApprovalSelection(null); };
+}
+
+function subscribeApprovalSelection(listener: () => void): () => void {
+  approvalSubscribers.add(listener);
+  return () => { approvalSubscribers.delete(listener); };
+}
+
+function getApprovalSelection(): ProviderShareApprovalSelection | null { return approvalSelection; }
+
+export function useProviderShareApprovalSelection(): ProviderShareApprovalSelection | null {
+  return useSyncExternalStore(subscribeApprovalSelection, getApprovalSelection, getApprovalSelection);
+}
+
 /** 读一次 owned 并发布(审批宿主播种 / 有待审批申请时随推送重读)。 */
 export async function refreshProviderShareOwnerPending(): Promise<ProviderShareOwnerState | null> {
   const api = providerShareApi();
@@ -300,6 +364,8 @@ export async function refreshProviderShareOwnerPending(): Promise<ProviderShareO
 
 /** 仅测试用：重置模块状态。 */
 export function resetProviderShareStoreForTests(): void {
+  unsubscribeCatalogPush?.();
+  unsubscribeCatalogPush = undefined;
   receivedSnapshot = { received: [], loaded: false };
   receivedStarted = false;
   receivedPushSeq = 0;
@@ -311,6 +377,8 @@ export function resetProviderShareStoreForTests(): void {
   receivedSubscribers.clear();
   pendingRequests = [];
   pendingSubscribers.clear();
+  approvalSelection = null;
+  approvalSubscribers.clear();
   pendingReshares = [];
   reshareSubscribers.clear();
 }

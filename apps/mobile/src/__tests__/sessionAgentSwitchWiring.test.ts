@@ -11,7 +11,7 @@ describe('new task remote Agent wiring', () => {
     const source = readSource('app/sessions/new.tsx');
     // 被控电脑支持远程 Agent 时,模型列表接上其他电脑与分享的供应商;被控电脑支持给 Worker 选 Agent
     // 位置时协同草稿与之不互斥,旧被控电脑仍互斥。
-    expect(source).toContain('const remoteAgentCatalogs = useRemoteAgentCatalogs({');
+    expect(source).toContain('const { catalogs: remoteAgentCatalogs, settled: remoteAgentCatalogsSettled } = useRemoteAgentCatalogsWithStatus({');
     expect(source).toContain('...(remoteAgentSupported && (!collabDraft || workerAgentLocationSupported)');
     expect(source).toContain('catalogs: remoteAgentCatalogs,\n                selectedDeviceId: remoteAgentPick?.deviceId ?? null,');
     // 供应商组:组里其他电脑收进组那一项(按被控电脑的目录比)。
@@ -28,8 +28,9 @@ describe('new task remote Agent wiring', () => {
     expect(source.split('const runGuard = () => effectiveDraft.agentDeviceId ? Promise.resolve({')).toHaveLength(3);
     expect(source).toContain('confirmUnauthenticated: effectiveDraft.agentDeviceId');
     expect(source).toContain("agentAuthVerdict === 'unauthenticated' || remoteAgentPick");
-    // 恢复草稿时把 Agent 所在电脑拆回远程选择。
-    expect(source).toContain('const { agentDeviceId, ...recovered } = saved;');
+    // 恢复的远程位置拆分行为由 newSessionDraftRecovery.test.ts 直接调用生产
+    // restoreNewSessionDraft 覆盖；这里保留页面接入，防止恢复时漏掉被控电脑身份。
+    expect(source).toMatch(/restoreNewSessionDraft\(\s*\{\s*setRemoteAgentChoice,/);
   });
 });
 
@@ -260,4 +261,49 @@ describe('session Agent switch UI wiring', () => {
     expect(controlAction).toContain('applied === false && rollbackPatch && deviceId');
     expect(controlAction).toContain('setError(formatRemoteError(err));');
   });
+});
+
+// guard: Permission ownership: bot-owned session controls remain host-only while user send/stop remain usable.
+describe("hostManagedSession.test.ts call-site contracts", () => {
+it('hides host-owned settings while preserving permission controls and the composer', () => {
+    const source = readFileSync(resolve(process.cwd(), 'app/sessions/[sessionId].tsx'), 'utf8');
+    expect(source).toContain('const sessionManagedByHost = useHostManagedSession(');
+    expect(source).toContain('messageOnly={sessionManagedByHost}');
+    const details = readFileSync(resolve(process.cwd(), 'src/session/SessionMenuSheet.tsx'), 'utf8');
+    expect(details).toContain('visible && !messageOnly');
+    expect(details).toContain('const mainActions = messageOnly ? []');
+    expect(details).toContain('const deleteAction = messageOnly ? undefined');
+    expect(details).toContain("!messageOnly && view === 'info'");
+    expect(source).toContain('{renderSessionPermissionButton()}');
+    expect(source).toContain('currentSession && runtimeOptions ? (');
+    expect(source).not.toContain('!sessionManagedByHost ? renderSessionPermissionButton() : null');
+    expect(source).toContain('{!sessionManagedByHost && composerRuntimeSummary ? (');
+    const modelAccess = source.slice(source.indexOf('const canConfigureSessionModel'), source.indexOf('// 共享模型自造'));
+    expect(modelAccess).toContain('canUseRemoteSessionControls');
+    expect(modelAccess).toContain('!sessionManagedByHost');
+    expect(modelAccess).toContain('!isSharedTaskPeer(deviceId)');
+    const modelPicker = source.slice(source.indexOf('const toggleComposerModelPicker'), source.indexOf('// 账号限额按需拉取'));
+    expect(modelPicker).toContain('if (!canConfigureSessionModel)');
+    expect(modelPicker).toContain('setModelSheetOpen(false);');
+    expect(source).toContain('{renderComposerAttachmentButton()}');
+    expect(source).toContain('{renderComposerInlineStop()}');
+  });
+});
+
+// guard: protocol-compatibility.md: never advertise a confirmation handshake the mobile controller cannot honor.
+it('does not advertise unimplemented model-window confirmations across context and transport', () => {
+const contextSource = readFileSync(
+      resolve(process.cwd(), "src/device-link/DeviceLinkContext.tsx"),
+      "utf8",
+    );
+const transportSource = readFileSync(
+      resolve(process.cwd(), "src/device-link/mobileMakerTransport.ts"),
+      "utf8",
+    );
+expect(contextSource).not.toContain(
+      "CONTROLLER_CAPABILITY_MODEL_WINDOW_CONFIRMATION_V1",
+    );
+expect(contextSource).not.toContain("model-window-confirmation-v1");
+expect(transportSource).not.toContain("confirmedOverflow");
+expect(transportSource).not.toContain("confirmedContextWindow");
 });

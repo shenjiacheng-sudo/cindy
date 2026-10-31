@@ -58,7 +58,10 @@ vi.mock('../waylandCapture', async (original) => ({
   ...(await original<typeof import('../waylandCapture')>()),
   isWaylandDesktop: () => h.wayland,
 }));
-vi.mock('../linuxInput', () => ({ readLinuxDesktopInputSupport: async () => h.linuxInput }));
+vi.mock('../linuxInput', () => ({
+  readLinuxDesktopInputSupport: async () => h.linuxInput,
+  isX11Desktop: () => process.platform === 'linux' && !h.wayland,
+}));
 vi.mock('../linuxDesktop', () => ({
   supportsLinuxDisplay: () => h.hyprland,
   supportsLinuxLock: () => false,
@@ -189,8 +192,8 @@ vi.mock('../controller', () => ({
       this.stop();
     }
     stopAndRestore = h.stopAndRestore;
-    releaseControl() {
-      h.releaseControl();
+    releaseControl(recoverInput = false) {
+      h.releaseControl(recoverInput);
     }
     tick() {}
     input = h.input;
@@ -554,6 +557,7 @@ it('turns an input-helper failure into a control release instead of a session st
   // Input is a lease-scoped capability: the desktop session keeps its lease,
   // its capture owner and its media when the helper dies.
   expect(h.releaseControl).toHaveBeenCalledTimes(1);
+  expect(h.releaseControl).toHaveBeenLastCalledWith(true);
   expect(h.stop).not.toHaveBeenCalled();
   expect(h.owner.dead).toBe(false);
 });
@@ -566,6 +570,7 @@ it('releases control when the input host refuses a batch before injecting it', (
   // later take-control must actually restart the helper.
   expect(() => h.deps.input([{ kind: 'release' }])).toThrow('DESKTOP_INPUT_UNAVAILABLE');
   expect(h.releaseControl).toHaveBeenCalledTimes(1);
+  expect(h.releaseControl).toHaveBeenLastCalledWith(true);
   expect(h.stop).not.toHaveBeenCalled();
 });
 
@@ -1322,4 +1327,29 @@ it('streams only the 代输入 window: native window capture, no screen source, 
   expect(h.nativeFrame).toHaveBeenLastCalledWith('1', true, undefined);
   h.deps.stopVideo();
   expect(h.setWindow).toHaveBeenLastCalledWith(null);
+});
+
+// A successful native XTest probe must be exposed by the real host entry point.
+it('advertises and starts X11 input while retaining the local opt-in', async () => {
+  const platform = process.platform;
+  Object.defineProperty(process, 'platform', { value: 'linux' });
+  try {
+    h.wayland = h.hyprland = false;
+    h.linuxInput = true;
+    const settings = await import('../../device-link/settings-store');
+    const { screen } = await import('electron');
+    vi.spyOn(screen, 'getAllDisplays').mockReturnValue([
+      { id: 1, size: { width: 800, height: 600 }, bounds: { x: 0, y: 0, width: 800, height: 600 } },
+    ] as any);
+    const config = { remoteDesktopEnabled: true, remoteControlEnabled: true };
+    vi.spyOn(settings, 'readDeviceLinkSettings').mockReturnValue(config as any);
+    expect((await h.deps.capabilities()).canControl).toBe(true);
+    h.startInput.mockClear();
+    await h.deps.startInput('1');
+    expect(h.startInput).toHaveBeenCalledExactlyOnceWith('1');
+    config.remoteDesktopEnabled = false;
+    expect((await h.deps.capabilities()).canControl).toBe(false);
+  } finally {
+    Object.defineProperty(process, 'platform', { value: platform });
+  }
 });

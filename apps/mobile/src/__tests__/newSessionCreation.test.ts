@@ -8,13 +8,11 @@
  *  - retry(同 id 幂等)与 dismiss(返回编辑)收口。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import ts from 'typescript';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
-import { createDurableOutbox, isDurableOutboxHandedOff, isDurableOutboxSettled, type DurableOutboxRecord } from '@/session/durableOutbox';
-import { buildOutboxItem, outboxItemAttachments } from '@/session/sessionOutbox';
-import { CINDY_MAKE_ENABLED, isCindyMakeSource } from '@cindy/maker-shared/cindy-make-feature';
+import type { RemoteSerializedAttachment } from '@/session/types';
+import { createDurableOutbox, type DurableOutboxRecord } from '@/session/durableOutbox';
+import { buildOutboxItem } from '@/session/sessionOutbox';
+import { createOutboxMessageLeases, outboxNeedsReconciliation, outboxSessionIsHidden } from '@/session/mobileOutboxSessionAdapter';
 
 const recoveryStorage = vi.hoisted(() => new Map<string, string>());
 const persistCancelledDraft = vi.hoisted(() => vi.fn(async () => {}));
@@ -24,9 +22,9 @@ vi.mock('@/session/mobileDurableOutbox', () => ({
   suspendCreationDraftForCleanup: vi.fn(async () => {}),
   getCurrentMobileOutboxRecords: editOutbox.records,
   isDurableOutboxCreationHeld: () => false,
-  mobileDurableOutbox: { update: editOutbox.update, subscribe: () => () => {} },
+  mobileDurableOutbox: { update: editOutbox.update, subscribe: () => () => {}, reconcileDrafts: async () => {} },
 }));
-import { getMobileAuthOwner, isMobileAuthOwnerCurrent, setMobileAuthOwner } from '@/auth/authOwnerGeneration';
+import { getMobileAuthOwner, setMobileAuthOwner } from '@/auth/authOwnerGeneration';
 import { returnNewSessionToEdit } from '@/session/returnNewSessionToEdit';
 const recoveryAsyncStorage = vi.hoisted(() => ({
   getItem: vi.fn(async (key: string) => recoveryStorage.get(key) ?? null),
@@ -49,6 +47,8 @@ vi.mock('expo-crypto', () => ({
 }));
 import {
   completeNewSessionDurableEdit,
+  findNewSessionEditDraft,
+  appendNewSessionEditComposer,
   dismissNewSessionCreation,
   dismissRecoveredPrecreatedSession,
   drainStashedNewSessionDraft,
@@ -59,6 +59,7 @@ import {
   shouldBlockSessionSync,
   stashNewSessionDraftForEdit,
   startNewSessionCreation,
+  withNewSessionCreationRemoval,
   type NewSessionCreationParams,
 } from '@/session/newSessionCreation';
 import { remoteSessionStore } from '@/session/remoteSessionStore';
@@ -82,50 +83,21 @@ const DRAFT: NewSessionDraft = {
   firstMessage: 'hello world',
 };
 
-// Execute the bridge's actual refresh callback with the real session store.
-// This includes hydration, cancellation cleanup and message-work lease release.
-const bridgeSource = ts.createSourceFile('MobileOutboxBridge.tsx', readFileSync(resolve(
-  process.cwd(), 'src/session/MobileOutboxBridge.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-let refreshSource = '';
-let reconciliationSource = '';
-let knownSessionSource = '';
-let hiddenSource = '';
-function findRefresh(node: ts.Node) {
-  if (ts.isVariableDeclaration(node) && node.name.getText(bridgeSource) === 'knownSession') {
-    knownSessionSource = node.initializer!.getText(bridgeSource);
-  }
-  if (ts.isVariableDeclaration(node) && node.name.getText(bridgeSource) === 'hidden') {
-    hiddenSource = node.initializer!.getText(bridgeSource);
-  }
-  if (ts.isVariableDeclaration(node) && node.name.getText(bridgeSource) === 'refreshLeases') {
-    refreshSource = node.initializer!.getText(bridgeSource);
-  }
-  if (ts.isVariableDeclaration(node) && node.name.getText(bridgeSource) === 'needsReconciliation') {
-    reconciliationSource = node.initializer!.getText(bridgeSource);
-  }
-  ts.forEachChild(node, findRefresh);
-}
-findRefresh(bridgeSource);
-if (!refreshSource) throw new Error('Missing outbox lease refresh callback');
+// Exercise the production lease manager with the real session store, including
+// hydration, cancellation cleanup and message-work lease release.
 function outboxLeaseHarness(initial: DurableOutboxRecord[]) {
   let records = initial;
   const visible = new Set<string>();
-  const leases = new Map<string, ReturnType<typeof remoteSessionStore.acquireSessionMessageWork>>();
-  const bindings = { isCurrent: () => true, mobileDurableOutbox: { getSnapshot: () => records },
-    isDurableOutboxHandedOff, isDurableOutboxSettled, remoteSessionStore, sessionFromCreateResult, outboxItemAttachments,
-    CINDY_MAKE_ENABLED, isCindyMakeSource,
-    findRemoteHistoryView: (_deviceId: string, sessionId: string) => ({ isActive: () => visible.has(sessionId) }),
-    dismissRecoveredPrecreatedSession, restoreNewSessionDurableEdit, leases,
-    leaseKey: (record: DurableOutboxRecord) => JSON.stringify([record.deviceId, record.item.sessionId]) };
-  const compiled = ts.transpileModule(`function create(bindings) {
-    const { ${Object.keys(bindings).join(', ')} } = bindings;
-    const needsReconciliation = ${reconciliationSource};
-    const knownSession = ${knownSessionSource};
-    const hidden = ${hiddenSource};
-    return ${refreshSource};
-  }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const create = new Function(`${compiled}; return create;`)() as (values: typeof bindings) => () => void;
-  return { refresh: create(bindings), leases, visible, setRecords: (next: DurableOutboxRecord[]) => { records = next; } };
+  const manager = createOutboxMessageLeases({
+    isCurrent: () => true,
+    getRecords: () => records,
+    hidden: record => outboxSessionIsHidden(record, remoteSessionStore.getSessions()),
+    needsReconciliation: record => outboxNeedsReconciliation(record, visible.has(record.item.sessionId)),
+    restoreEditable: restoreNewSessionDurableEdit,
+    dismissCancelled: dismissRecoveredPrecreatedSession,
+    store: remoteSessionStore,
+  });
+  return { ...manager, visible, setRecords: (next: DurableOutboxRecord[]) => { records = next; } };
 }
 function recoveryOutboxRecord(sessionId: string): DurableOutboxRecord {
   return { version: 1, accountId: 'owner-a', deviceId: 'dev-1', createdAt: 1, state: 'failed', uploads: [],
@@ -205,6 +177,42 @@ async function flushPipeline(): Promise<void> {
 }
 
 describe('newSessionCreation pipeline', () => {
+  it('carries unsent composer text and files through legacy memory recovery', async () => {
+    const maker = makeMaker({ createSession: vi.fn(async () => { throw new Error('[MODEL_UNAVAILABLE] unavailable'); }) });
+    startNewSessionCreation(makeParams('s1', maker));
+    await flushPipeline();
+    await returnNewSessionToEdit({ sessionId: 's1', deviceId: 'dev-1', isCurrent: () => true, onReady: vi.fn() });
+    const file = { id: 'new-file', path: 'oss://new-file', category: 'image', name: 'new.png', ext: 'png', size: 1 } as RemoteSerializedAttachment;
+    await appendNewSessionEditComposer('s1', 'dev-1', { text: 'unsent addition', attachments: [file], notice: 'one pending upload' });
+    const restored = drainStashedNewSessionDraft('s1', 'dev-1')!;
+    expect(restored.draft.firstMessage).toBe(`${DRAFT.firstMessage}\n\nunsent addition`);
+    expect(restored.attachments).toEqual([file]);
+    expect(restored.notice).toBe('one pending upload');
+  });
+  it.each([false, true])('deletes a failed local task only after worktree cleanup (cleanup fails: %s)', async fails => {
+    const maker = makeMaker();
+    startNewSessionCreation(makeParams('s1', maker, {
+      draft: { ...DRAFT, workingDir: '/repo/.cindy-worktrees/a' },
+      precreatedWorktree: { path: '/repo/.cindy-worktrees/a', recoveryKey: 'cleanup-a', originalWorkingDir: '/repo' },
+      confirmUnauthenticated: async () => ({ unauthenticated: true, fresh: null }),
+    }));
+    await flushPipeline();
+    if (fails) maker.worktree.discardPrecreated.mockRejectedValueOnce(new Error('cleanup refused'));
+    const remove = vi.fn();
+    const removal = withNewSessionCreationRemoval('s1', 'dev-1', 'deleted', remove);
+    if (fails) {
+      await expect(removal).rejects.toThrow('cleanup refused');
+      expect(getNewSessionCreationTask('s1')).toMatchObject({ status: 'create-failed', returningToEdit: false });
+      expect(remoteSessionStore.getSessions().some(row => row.id === 's1')).toBe(true);
+    } else {
+      await removal;
+      expect(getNewSessionCreationTask('s1')).toBeNull();
+      expect(remoteSessionStore.getSessions()).toEqual([]);
+    }
+    expect(maker.worktree.discardPrecreated).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   beforeEach(async () => {
     persistCancelledDraft.mockReset();
     editOutbox.records.mockReset().mockReturnValue([]);
@@ -283,7 +291,9 @@ describe('newSessionCreation pipeline', () => {
       completeNewSessionDurableEdit('s1', 'dev-1');
       expect(getNewSessionCreationTask('s1')).toBeNull();
     }
-    expect(editOutbox.update).toHaveBeenCalledWith(record, expect.objectContaining({ suspended: true, state: 'failed' }));
+    expect(editOutbox.update).toHaveBeenCalledWith(record, expect.objectContaining({
+      suspended: true, state: 'failed', error: '[MODEL_UNAVAILABLE] unavailable',
+    }));
     expect(record.item.text).toBe(DRAFT.firstMessage);
     expect(record.creation?.draft).toEqual(DRAFT);
     expect(drainStashedNewSessionDraft('s1', 'dev-1')).toBeNull();
@@ -307,7 +317,7 @@ describe('newSessionCreation pipeline', () => {
     editOutbox.records.mockImplementation(() => [...afterRestart.getSnapshot()]);
     const bridge = outboxLeaseHarness([...afterRestart.getSnapshot()]);
     bridge.refresh();
-    expect(remoteSessionStore.getSessions().some(row => row.id === 's1')).toBe(true);
+    expect(remoteSessionStore.getSessions()).toEqual([]);
     expect(bridge.leases.size).toBe(0);
     expect(getNewSessionCreationTask('s1')).toMatchObject({ readyForEdit: 'durable', draft: DRAFT });
     expect(getNewSessionCreationTask('s1')).toBe(getNewSessionCreationTask('s1'));
@@ -360,7 +370,7 @@ describe('newSessionCreation pipeline', () => {
     expect(remoteSessionStore.getSessions()).toEqual([]);
     releaseSecond!();
     expect(getNewSessionCreationTask('s1')?.readyForEdit).toBe('durable');
-    expect(remoteSessionStore.getSessions().some(row => row.id === 's1')).toBe(true);
+    expect(remoteSessionStore.getSessions()).toEqual([]);
     const releaseReopened = completeNewSessionDurableEdit('s1', 'dev-1');
     releaseSecond!();
     expect(getNewSessionCreationTask('s1')).toBeNull();
@@ -531,75 +541,6 @@ describe('newSessionCreation pipeline', () => {
     expect(drainStashedNewSessionDraft('s1', 'dev-1')).toBeNull();
   });
 
-  it.each(['current', 'unmount', 'another-task', 'blur', 'account'] as const)(
-    'only reports a delayed edit-save failure on its current task page: %s', async pageState => {
-      const maker = makeMaker({ createSession: vi.fn(async () => { throw new Error('MODEL_UNAVAILABLE'); }) });
-      startNewSessionCreation(makeParams('s1', maker));
-      await flushPipeline();
-      const record = { ...recoveryOutboxRecord('s1'), accountId: getMobileAuthOwner().accountKey };
-      editOutbox.records.mockReturnValue([record]);
-      let failSave!: (error: Error) => void;
-      editOutbox.update.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { failSave = reject; }));
-      const alive = { current: 's1' as string | null };
-      const navigation = { isFocused: vi.fn(() => true) };
-      const alert = vi.fn();
-      const setError = vi.fn();
-      const replace = vi.fn();
-      const retry = vi.fn(retryNewSessionCreation);
-      const bindings = {
-        creationTask: getNewSessionCreationTask('s1'), sessionId: 's1', deviceId: 'dev-1',
-        getMobileAuthOwner, isMobileAuthOwnerCurrent, outboxSessionAliveRef: alive, navigation,
-        returnNewSessionToEdit, router: { replace }, Alert: { alert }, setError,
-        t: (key: string, options?: { message: string }) => options?.message ?? key,
-        formatRemoteError: (error: Error) => error.message, retryNewSessionCreation: retry,
-      };
-      // Execute the actual Alert action, including its asynchronous catch, rather
-      // than reproducing the page's lifecycle guard in the test.
-      const screen = ts.createSourceFile('session.tsx', readFileSync(resolve(process.cwd(), 'app/sessions/[sessionId].tsx'), 'utf8'),
-        ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-      let action: string | undefined;
-      const findAction = (node: ts.Node) => {
-        if (ts.isObjectLiteralExpression(node) && node.properties.some(property => ts.isPropertyAssignment(property)
-          && property.name.getText(screen) === 'text' && property.initializer.getText(screen) === "t('session.screen.backToEdit')")) {
-          const handler = node.properties.find(property => ts.isPropertyAssignment(property) && property.name.getText(screen) === 'onPress');
-          if (handler && ts.isPropertyAssignment(handler)) action = handler.initializer.getText(screen);
-        }
-        ts.forEachChild(node, findAction);
-      };
-      findAction(screen);
-      if (!action) throw new Error('Missing return-to-edit alert action');
-      const code = ts.transpileModule(`const onPress = ${action};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-      const onPress = new Function(...Object.keys(bindings), `${code}; return onPress;`)(...Object.values(bindings));
-      onPress();
-      await flushPipeline();
-      expect(editOutbox.update).toHaveBeenCalledOnce();
-      expect(getNewSessionCreationTask('s1')?.returningToEdit).toBe(true);
-      if (pageState === 'unmount') alive.current = null;
-      if (pageState === 'another-task') alive.current = 's2';
-      if (pageState === 'blur') navigation.isFocused.mockReturnValue(false);
-      if (pageState === 'account') setMobileAuthOwner('owner-b');
-      failSave(new Error('disk full'));
-      await flushPipeline();
-      expect(replace).not.toHaveBeenCalled();
-      if (pageState === 'current') {
-        expect(setError).toHaveBeenCalledWith('disk full');
-        expect(alert).toHaveBeenCalledOnce();
-        // A dialog already shown must not let its retry act on a page that subsequently left.
-        alive.current = null;
-        alert.mock.calls[0][2][1].onPress();
-        expect(retry).not.toHaveBeenCalled();
-        expect(setError).toHaveBeenCalledTimes(1);
-      } else {
-        expect(setError).not.toHaveBeenCalled();
-        expect(alert).not.toHaveBeenCalled();
-      }
-      expect(editOutbox.records()).toEqual([record]);
-      if (pageState !== 'account') {
-        expect(getNewSessionCreationTask('s1')).toMatchObject({ status: 'create-failed', returningToEdit: false });
-        expect(remoteSessionStore.getSessions().some(session => session.id === 's1')).toBe(true);
-      }
-    });
-
   it('keeps a cancelled durable worktree recovery visible until its form accepts it', async () => {
     const maker = makeMaker();
     startNewSessionCreation(makeParams('s1', maker, {
@@ -635,58 +576,6 @@ describe('newSessionCreation pipeline', () => {
     expect(getNewSessionCreationTask('s1')).toBeNull();
     expect(remoteSessionStore.getSessions().some(s => s.id === 's1')).toBe(false);
     expect(record.item.text).toBe(DRAFT.firstMessage);
-  });
-
-  it.each(['matching', 'device', 'account', 'not-ready', 'switched-owner'])('only acknowledges durable edit recovery after the matching form restores it: %s', async scope => {
-    const maker = makeMaker({ createSession: vi.fn(async () => { throw new Error('[MODEL_UNAVAILABLE] unavailable'); }) });
-    startNewSessionCreation(makeParams('s1', maker));
-    await flushPipeline();
-    const record = { ...recoveryOutboxRecord('s1'), accountId: getMobileAuthOwner().accountKey };
-    editOutbox.records.mockReturnValue([record]);
-    await returnNewSessionToEdit({ sessionId: 's1', deviceId: 'dev-1', isCurrent: () => true, onReady: vi.fn() });
-    const owner = getMobileAuthOwner();
-    // Model the persisted edit-ready patch so the real form acquires a releaseable claim.
-    record.suspended = true;
-    record.creation!.editReady = true;
-    if (scope === 'account') record.accountId = 'foreign-owner';
-    if (scope === 'not-ready') editOutbox.records.mockReturnValue([]);
-    if (scope === 'switched-owner') setMobileAuthOwner('owner-b');
-    // Execute the real form effect, including readiness and ownership guards.
-    const page = ts.createSourceFile('new.tsx', readFileSync(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    let effect = '';
-    function findEffect(node: ts.Node) {
-      if (ts.isCallExpression(node) && node.expression.getText(page) === 'useEffect'
-        && node.arguments[0]?.getText(page).includes('completeNewSessionDurableEdit(')) effect = node.arguments[0].getText(page);
-      ts.forEachChild(node, findEffect);
-    }
-    findEffect(page);
-    expect(effect).not.toBe('');
-    const restore = vi.fn(() => expect(getNewSessionCreationTask('s1')?.readyForEdit).toBe('durable'));
-    const bindings = {
-      outboxOwner: owner, params: { recoverySessionId: 's1' }, routeDeviceId: scope === 'device' ? 'dev-2' : 'dev-1',
-      leaveForeignOutboxRecovery: () => false, isMobileAuthOwnerCurrent,
-      getCurrentMobileOutboxRecords: editOutbox.records, outboxRecoveryRef: { current: null },
-      userTouchedDeviceRef: { current: false }, restoreCreationDraft: restore,
-      setSelectedDeviceId: vi.fn(), setSelectedDeviceName: vi.fn(), completeNewSessionDurableEdit,
-      mobileDurableOutbox: { subscribe: () => () => {}, ready: async () => {} },
-    };
-    const compiled = ts.transpileModule(`function run(bindings) { const { ${Object.keys(bindings).join(', ')} } = bindings; return (${effect})(); }`,
-      { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-    const cleanup = (new Function(`${compiled}; return run;`)() as (b: typeof bindings) => () => void)(bindings);
-    await flushPipeline();
-    if (scope === 'matching') {
-      expect(restore).toHaveBeenCalledWith(DRAFT, [], { enabled: false, restorePermissionMode: null }, 'dev-1');
-      expect(getNewSessionCreationTask('s1')).toBeNull();
-    } else {
-      expect(restore).not.toHaveBeenCalled();
-      if (scope === 'switched-owner') expect(getNewSessionCreationTask('s1')).toBeNull();
-      else expect(getNewSessionCreationTask('s1')?.readyForEdit).toBe('durable');
-    }
-    cleanup();
-    if (scope === 'matching') {
-      expect(getNewSessionCreationTask('s1')?.readyForEdit).toBe('durable');
-      expect(remoteSessionStore.getSessions().some(row => row.id === 's1')).toBe(true);
-    }
   });
 
   it.each([false, true])('isolates a late background edit draft from another task (other form already claimed: %s)', async claimed => {

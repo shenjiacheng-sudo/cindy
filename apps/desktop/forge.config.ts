@@ -25,6 +25,7 @@ import { preparePackagedNodePty } from './forge-node-pty';
 import { prunePackagedRuntime, prunePackagedMigrationSnapshots } from './forge-prune-runtime';
 import { copyRuntimeDependencyTrees as copyRuntimeTrees } from './forge-runtime-deps';
 import { packagedResourcesPath, stagePackagedThirdPartyNotices } from './forge-third-party-notices';
+import { stageMacPermissionLocales } from './forge-mac-locales';
 import {
   swiftTargetTriple,
   swiftTargetTriplesForForgeArch,
@@ -146,6 +147,9 @@ const NATIVE_RUNTIME_DEPS = [
   '@protobufjs/pool',
   '@protobufjs/utf8',
   'long',
+  // turndown keeps this require in the bundled browser recipes. Ship its
+  // dependency-free DOM implementation so packaged startup can resolve it.
+  '@mixmark-io/domino',
   // @parcel/watcher: file-browser 用的 OS 原生 watcher。N-API 模块, 无需
   // electron-rebuild, 但平台特定子包 (@parcel/watcher-{platform}-{arch})
   // 必须跟主包一起进包, 否则运行时 require('@parcel/watcher') 找不到 .node。
@@ -790,14 +794,20 @@ function extraResourcesForTarget(targetPlatform: string): string[] {
     'resources/cindy-version-protocol.json',
     // Input bytes for upgrading retired preset avatars to ordinary managed images.
     'resources/legacy-teammate-avatars',
+    // Bundled preset artwork main draws outside the renderer (Agent Island companion avatars).
+    'resources/companion-preset-avatars',
     'resources/teammate-portrait-gallery.png',
     // Cindy-owned Agent Skills are materialized under userData on startup.
     'resources/system-skills',
+    // Bundled Bot Market teammate packages; packaged builds read them from process.resourcesPath (bot-import/host.ts).
+    'resources/bot-packages',
     'resources/tools',
     'drizzle',
     'resources/cc-manager',
     'resources/anthropic-compat-proxy',
     'resources/remote-file-service',
+    // 自建中转单文件:「部署到我的服务器」经 SSH 上传到用户服务器运行。
+    'resources/device-link-relay',
     // .cindy 发布者/审核 Ed25519 公钥信任表(私钥永不进客户端)。
     'resources/ghost-trust.json',
     // 远端 pi manager bundle(Node 单例 daemon,SSH remote 会话的进程持有器)。
@@ -924,6 +934,7 @@ const MACOS_SESSION_DRAG_RELEASE_HELPER_DEPLOYMENT_TARGET = 'macos10.15';
 const MACOS_MENUBAR_HELPER_DEPLOYMENT_TARGET = 'macos14.0';
 const MACOS_XBOX_GAMEPAD_HELPER_DEPLOYMENT_TARGET = 'macos11.0';
 const MACOS_REMOTE_DESKTOP_INPUT_DEPLOYMENT_TARGET = 'macos10.15';
+const MACOS_REGION_SCREENSHOT_HELPER_DEPLOYMENT_TARGET = 'macos10.15';
 
 function swiftArchLabel(arch: ForgeArch, deploymentTarget: string): string {
   return swiftTargetTriplesForForgeArch(arch, deploymentTarget)
@@ -1354,6 +1365,57 @@ function buildWindowsInputHelper(
   fs.copyFileSync(path.join(source, 'target', target, 'release', name), path.join(dest, name));
 }
 
+/**
+ * 框选截图的窗口 / 界面元素识别程序 (只产出几何信息)。Windows 用 Rust + UI
+ * Automation, macOS 用 Swift + CGWindowList / AX; 缺失时截图照常可用, 只是不吸附。
+ */
+function buildRegionScreenshotHelper(platform: ForgePlatform, arch: ForgeArch): void {
+  const dest = path.join(__dirname, 'resources', 'tools', 'region-screenshot');
+  if (process.platform === 'darwin' && isMacForgePlatform(platform)) {
+    const src = path.join(__dirname, 'native', 'region-screenshot', 'macos-snapshot.swift');
+    fs.mkdirSync(dest, { recursive: true });
+    const output = path.join(dest, 'cindy-macos-screenshot-snapshot');
+    buildSwiftHelperForForgeArch(
+      src,
+      output,
+      arch,
+      MACOS_REGION_SCREENSHOT_HELPER_DEPLOYMENT_TARGET,
+      ['-O'],
+      'region screenshot snapshot helper',
+    );
+    fs.chmodSync(output, 0o755);
+    return;
+  }
+  if (process.platform !== 'win32' || platform !== 'win32') return;
+  const target =
+    arch === 'arm64' ? 'aarch64-pc-windows-msvc' : arch === 'x64' ? 'x86_64-pc-windows-msvc' : null;
+  if (!target) throw new Error(`[forge] Unsupported region screenshot helper architecture: ${arch}`);
+  const source = path.join(__dirname, 'native', 'region-screenshot', 'windows-snapshot');
+  const userCargo = process.env.USERPROFILE
+    ? path.join(process.env.USERPROFILE, '.cargo', 'bin', 'cargo.exe')
+    : 'cargo';
+  const result = spawnSync(
+    fs.existsSync(userCargo) ? userCargo : 'cargo',
+    [
+      'build',
+      '--locked',
+      '--release',
+      '--target',
+      target,
+      '--manifest-path',
+      path.join(source, 'Cargo.toml'),
+    ],
+    { stdio: 'inherit', windowsHide: true },
+  );
+  if (result.error || result.status !== 0)
+    throw new Error(
+      `[forge] Region screenshot helper build failed: ${result.error?.message ?? result.status}`,
+    );
+  const name = 'cindy-windows-screenshot-snapshot.exe';
+  fs.mkdirSync(dest, { recursive: true });
+  fs.copyFileSync(path.join(source, 'target', target, 'release', name), path.join(dest, name));
+}
+
 function buildMacXboxGamepadHelper(platform: ForgePlatform, arch: ForgeArch): void {
   if (process.platform !== 'darwin' || !isMacForgePlatform(platform)) return;
   const src = path.join(__dirname, 'native', 'xbox-gamepad', 'macos-xbox-gamepad-helper.swift');
@@ -1622,7 +1684,13 @@ function buildMacMenubarHelper(platform: ForgePlatform, arch: ForgeArch): void {
   const src = path.join(srcDir, 'macos-menubar-helper.swift');
   const destDir = path.join(__dirname, 'resources', 'tools', 'menubar');
   const dest = path.join(destDir, 'xdt-macos-menubar-helper');
-  const assets = ['wordmark-light.png', 'wordmark-dark.png'];
+  const assets = [
+    'wordmark-light.png',
+    'wordmark-dark.png',
+    'BarlowCondensed-Light.ttf',
+    'BarlowCondensed-Medium.ttf',
+    'BarlowCondensed-SemiBold.ttf',
+  ];
   if (!fs.existsSync(src)) {
     throw new Error(`[forge] macOS menu bar helper source missing at ${src}`);
   }
@@ -1919,6 +1987,9 @@ const config: ForgeConfig = {
           const resources = packagedResourcesPath(buildPath, platform);
           prunePackagedPreRunNode(resources, platform, arch);
           prunePackagedMigrationSnapshots(resources);
+          if (platform === 'darwin' || platform === 'mas') {
+            stageMacPermissionLocales(resources);
+          }
           callback();
         } catch (err) {
           callback(err as Error);
@@ -1971,12 +2042,26 @@ const config: ForgeConfig = {
       buildWindowsGamepadHelper(platform, arch);
       buildWindowsAtomicRenameHelper(platform, arch);
       buildWindowsTaskbarAddon(platform, arch);
+      if (platform === 'darwin') {
+        const trackpadBuild = spawnSync(
+          process.execPath,
+          [
+            path.join(__dirname, 'native/trackpad/build.mjs'),
+            path.join(__dirname, 'resources/tools/trackpad/cindy-trackpad.node'),
+            arch,
+          ],
+          { stdio: 'inherit' },
+        );
+        if (trackpadBuild.error || trackpadBuild.status !== 0)
+          throw new Error('Native trackpad build failed');
+      }
       buildMacVoiceInputModifierShortcutListener(platform, arch);
       buildMacAgentIslandHelper(platform, arch);
       buildMacComputerPermissionGuideHelper(platform, arch);
       buildMacSessionDragReleaseHelper(platform, arch);
       buildMacMenubarHelper(platform, arch);
       buildRemoteDesktopInput(platform, arch);
+      buildRegionScreenshotHelper(platform, arch);
     },
     // packaged dir 产出后、makers 跑之前签内部 .exe。这样 NSIS 包出来的
     // Setup.exe 内嵌的、和 publish 阶段从同一 packagedDir 打的热更 ZIP 内嵌的，
@@ -2058,6 +2143,11 @@ const config: ForgeConfig = {
         },
         {
           entry: 'src/main/bot-import/openclawCronWorker.ts',
+          config: 'vite.contacts-sync-codec-worker.config.ts',
+          target: 'preload',
+        },
+        {
+          entry: 'src/main/performance-trace/traceRedactionWorker.ts',
           config: 'vite.contacts-sync-codec-worker.config.ts',
           target: 'preload',
         },
@@ -2154,6 +2244,27 @@ const config: ForgeConfig = {
           target: 'preload',
         },
         {
+          // 全局框选截图浮层与贴图窗口: 各自只暴露截图的固定通道和只读外观快照。
+          entry: 'src/preload/regionScreenshotPreload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
+        {
+          entry: 'src/preload/regionScreenshotPinPreload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
+        {
+          entry: 'src/preload/regionScreenshotEditorPreload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
+        {
+          entry: 'src/preload/recordingPreviewPreload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
+        {
           // 资源用量独立窗不加载主应用的通用 bridge 与模块级同步初始化。
           entry: 'src/preload/resourceUsagePreload.ts',
           config: 'vite.preload.config.ts',
@@ -2167,12 +2278,6 @@ const config: ForgeConfig = {
         {
           // 右侧栏独立子窗口专用 preload:最小权限 bridge,不加载主 preload 完整桥。
           entry: 'src/preload/sidebarWindowPreload.ts',
-          config: 'vite.preload.config.ts',
-          target: 'preload',
-        },
-        {
-          // 插件面板独立窗口专用 preload:最小权限 bridge。
-          entry: 'src/preload/ghostPanelWindowPreload.ts',
           config: 'vite.preload.config.ts',
           target: 'preload',
         },

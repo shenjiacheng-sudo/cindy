@@ -952,6 +952,16 @@ function buildDesktopCommonEntries(apacheText, sharpPackageNames) {
 
   // Workspace packages are skipped by npm closure discovery. The vendored
   // OpenCodex helpers are also bundled into Desktop main, not only the SSH proxy.
+  const opencli = readJson(path.join(REPO_ROOT, "packages/opencli-vendor/UPSTREAM.json"));
+  entries.push(
+    bundledComponent({
+      name: "OpenCLI browser recipes (adapted)",
+      version: opencli.revision,
+      license: "Apache-2.0",
+      url: `${opencli.repository}/tree/${opencli.revision}`,
+      licenseText: readBundledLicense("packages/opencli-vendor/LICENSE"),
+    }),
+  );
   const opencodex = readJson(path.join(REPO_ROOT, "packages/model-compat/UPSTREAM.json"));
   entries.push(
     bundledComponent({
@@ -1004,6 +1014,16 @@ function buildMacEntries() {
       license: "MIT",
       url: "https://github.com/wxtsky/CodeIsland",
       licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2026 wxtsky"),
+    }),
+    // 菜单栏余量面板的数字字体，随 menubar helper 一起分发。
+    bundledComponent({
+      name: "Barlow Condensed fonts",
+      version: "bundled",
+      license: "OFL-1.1",
+      url: "https://github.com/jpt/barlow",
+      licenseText: readBundledLicense(
+        "apps/desktop/native/menubar/BarlowCondensed-OFL.txt",
+      ),
     }),
   ];
 }
@@ -1508,6 +1528,7 @@ function assertTrackedBinariesRegistered() {
     "apps/android-platform-tools-bin/",
     "apps/desktop/native/sqlite-vec/",
     "apps/mobile/assets/fonts/JetBrainsMono-",
+    "apps/desktop/native/menubar/BarlowCondensed-",
   ];
   // Windows updater 内置 VC++ Runtime 按精确文件登记(披露条目见
   // restrictedManualEntries):目录内新增其它二进制时这里会重新拦下要求补披露。

@@ -80,6 +80,7 @@ class RawPeer {
   ): Promise<T> {
     const id = this.nextId++;
     const result = new Promise<unknown>((resolve, reject) => {
+      // real-wait: exercise the production RPC timeout when a fixture never responds.
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error('Fixture RPC timed out: ' + method));
@@ -358,7 +359,8 @@ describe('2026-01-26 MCP Apps conformance against an independent local server', 
         appInfo: { name: 'Raw', version: '1' },
         appCapabilities: {},
       }),
-    ).rejects.toThrow('MCP_APP_ALREADY_INITIALIZED');
+    ).resolves.toMatchObject({ protocolVersion: '2026-01-26' });
+    await f.peer.notify('ui/notifications/initialized');
     expect(await f.peer.request('ping')).toEqual({});
   });
   it('negotiates an unknown requested version to the actual supported stable version', async () => {
@@ -454,6 +456,7 @@ describe('2026-01-26 MCP Apps conformance against an independent local server', 
       expect.objectContaining({ name: 'refresh_metrics' }),
       { threshold: 99 },
       expect.any(AbortSignal),
+      expect.objectContaining({ clientId: expect.any(String), serverId: expect.any(String) }),
     );
     expect(
       await f.peer.request('tools/call', { name: 'error_metrics', arguments: {} }),
@@ -547,7 +550,7 @@ describe('2026-01-26 MCP Apps conformance against an independent local server', 
     });
     expect(f.audit.mock.calls.flat()).not.toContain('Fixture content should never be logged');
   });
-  it('does not advertise unsupported capabilities and returns standard unknown-method errors', async () => {
+  it('keeps download unavailable on a Host without a local file handler and rejects unknown methods', async () => {
     const f = await fixture();
     for (const capability of ['sampling', 'downloadFile'])
       expect(f.init!.hostCapabilities).not.toHaveProperty(capability);

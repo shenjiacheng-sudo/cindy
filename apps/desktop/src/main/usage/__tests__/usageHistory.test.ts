@@ -337,6 +337,22 @@ describe('getSubscriptionValuePriceFor', () => {
 });
 
 describe('readUsageHistoryWith', () => {
+  it('keeps media fees in actual totals and model detail without inventing chat tokens', async () => {
+    const money = actual(1.25);
+    const result = await readUsageHistoryWith(makeDeps({
+      getAllSpendDays: async () => [{ day: TODAY, monies: [money] }],
+      getModelUsageSince: async () => [{
+        ...modelRow(TODAY, 'pi', 'seedance-2.0', money), agentKind: 'media',
+      }],
+    }));
+    expect(result.totals.today.amount).toBe(1.25);
+    expect(result.totals.last30DaysTokens).toBe(0);
+    expect(result.models).toEqual([expect.objectContaining({
+      agentKind: 'media', model: 'seedance-2.0', money, estimatedMoney: null,
+    })]);
+    expect(result.modelDaily[0]).toMatchObject({ agentKind: 'media', apiMoney: money, tokens: 0 });
+  });
+
   it('supports an all-time request without changing the default 30-day model window', async () => {
     const oldRow = modelRow('2026-04-01', 'codex', 'gpt-5.5', actual(0), {
       inputTokens: 123,
@@ -870,6 +886,19 @@ describe('production cache and empty payload', () => {
     expect(payload.taskDaily).toBeUndefined();
     expect(getSessionUsageSince).not.toHaveBeenCalled();
     expect(getUsageTaskMeta).not.toHaveBeenCalled();
+  });
+
+  // Launch race: the menu bar (and the iPhone widgets it feeds) cached a fresh-looking
+  // empty payload for minutes when the database was not open yet.
+  it('marks an unreadable first read stale so callers retry instead of caching zero usage', async () => {
+    vi.mocked(getAllSpendDays).mockRejectedValueOnce(new Error('DbClient not ready'));
+    const first = await readUsageHistory({ days: 30 });
+    expect(first.stale).toBe(true);
+    expect(first.totals.today).toEqual(zeroUsageMoney());
+    vi.mocked(getAllSpendDays).mockResolvedValue([{ day: TODAY, monies: [actual(2)] }]);
+    const second = await readUsageHistory({ days: 30 });
+    expect(second.stale).toBe(false);
+    expect(second.totals.today).toEqual(actual(2));
   });
 
   it('writes a structured fresh payload and serves it from memory', async () => {

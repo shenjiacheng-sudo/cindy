@@ -109,6 +109,7 @@ async function seedSourceResources() {
   }), { skillSourceDir: path.join(root, from) });
   fs.mkdirSync(path.join(scope.dir, 'ghost-kv'));
   fs.writeFileSync(path.join(scope.dir, 'ghost-kv', from + '.json'), JSON.stringify({ private: 'org' }));
+  fs.mkdirSync(path.join(scope.dir, 'ghost-handoff', from, 'copy'), { recursive: true });
   cindy.writeGhostCindyInflightLimit(from, 3);
   errand.writePluginTaskConfig(from, { permissionMode: 'auto', workingDir: '/org-workspace' });
   errand.writeGhostErrandSessionId(from, 'org-session');
@@ -154,6 +155,9 @@ it('archives and restores source-owned data without changing logical UI placemen
   await tasks.insert(run);
   await tasks.insert({ ...task, id: 'other', pluginId: to });
   await relocateGhostUserDataResources(from, archive, resources);
+  // Chat file handoff copies move with the archived source, invisible to the new one.
+  expect(fs.existsSync(path.join(scope.dir, 'ghost-handoff', archive, 'copy'))).toBe(true);
+  expect(fs.existsSync(path.join(scope.dir, 'ghost-handoff', from))).toBe(false);
   expect(await tasks.find(from, 'create', '', task.requestKey)).toBeUndefined();
   expect(await tasks.get(task.id)).toEqual({ ...task, pluginId: archive, revision: 1 });
   expect(await tasks.get(run.id)).toEqual({ ...run, pluginId: archive, revision: 1 });
@@ -192,7 +196,7 @@ it('completes source replacement and another plugin uninstall without reversing 
   const archive = '_ns__cindy-archive-00000000-0000-4000-8000-000000000002__helper';
   const service = createPluginTaskService({
     store: tasks, assertCurrent: () => {}, assertAuthorized: vi.fn(), readPermissionMode: vi.fn(),
-    resolveRoute: vi.fn(), createSession: vi.fn(), readSession: vi.fn(), readLiveSession: vi.fn(),
+    readModelPreference: vi.fn(), resolveRoute: vi.fn(), createSession: vi.fn(), readSession: vi.fn(), readLiveSession: vi.fn(),
     dispatch: vi.fn(), inspect: vi.fn(), cancel: vi.fn(),
   });
   let entered!: () => void, finish!: () => void;
@@ -217,12 +221,12 @@ it('completes source replacement and another plugin uninstall without reversing 
   const code = ts.transpileModule(`return (async () => { ${source.slice(start, end)} })();`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const remove = new Function('activeOwnerScopeKey', 'pluginTaskUninstaller', 'storagePart', 'manager', 'relId', 'throwUninstallError', 'currentPluginUsageService', 'log', code);
+  const remove = new Function('activeOwnerScopeKey', 'pluginTaskUninstaller', 'storagePart', 'manager', 'relId', 'throwUninstallError', 'currentPluginUsageService', 'log', 'options', code);
   const detach = vi.fn(async () => {});
   const log = { warn: vi.fn() };
   const removing = remove(() => scope.dir, (id: string, callback: () => Promise<void>) => service.withUninstall(id, callback),
     '_root__other', manager, '_ns/_root/other', (failure: { reason: string }) => { throw new Error(failure.reason); },
-    () => ({ detach }), log);
+    () => ({ detach }), log, {});
   await new Promise<void>(resolve => setImmediate(resolve));
   finish();
   const [updated] = await Promise.all([updating, removing]);

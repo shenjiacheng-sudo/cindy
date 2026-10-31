@@ -22,7 +22,7 @@ describe('desktop auth session-expiry detection', () => {
   ).replace(/\r\n/g, '\n');
 
   it('runtime refresh 发现磁盘 token 消失但会话活着时,按确定性失效走会话过期出口', () => {
-    const start = authSource.indexOf('export async function refresh(): Promise<boolean> {');
+    const start = authSource.indexOf('export async function refresh(');
     const end = authSource.indexOf('const diskTokenChangedBeforeRefresh', start);
     const body = authSource.slice(start, end);
 
@@ -141,7 +141,7 @@ describe('desktop auth session-expiry detection', () => {
     );
 
     // 自救函数:节流(token-rotating 端点不能每次重连都打)+ refresh 成功后立即重连。
-    const recoverStart = deviceLinkSource.indexOf('function recoverFromRelayAuthFailure(): void {');
+    const recoverStart = deviceLinkSource.indexOf('function recoverFromRelayAuthFailure(crossAccount = false): void {');
     const recoverEnd = deviceLinkSource.indexOf('\n}\n', recoverStart);
     const recoverBody = deviceLinkSource.slice(recoverStart, recoverEnd);
     expect(recoverBody).toContain('elapsed < RELAY_AUTH_RECOVERY_MIN_INTERVAL_MS');
@@ -149,13 +149,15 @@ describe('desktop auth session-expiry detection', () => {
     // 会让自救在首次尝试后永久停摆,退回无限 401。延迟触发前复查 issue 仍在,
     // 避免已自愈后多余轮换 token。
     expect(recoverBody).toContain('relayAuthRecoveryRetryTimer = setTimeout(');
-    expect(recoverBody).toContain("client?.getConnectionIssue()?.kind !== 'auth-failed'");
+    expect(recoverBody).toContain("connection()?.getConnectionIssue()?.kind !== 'auth-failed'");
     expect(recoverBody).toContain('authManager');
-    expect(recoverBody).toContain('.refresh()');
-    expect(recoverBody).toContain("client?.connectNow('relay-auth-recovered');");
+    expect(recoverBody).toContain('.refresh({ networkRecovered: true })');
+    expect(recoverBody).toContain("connection()?.connectNow('relay-auth-recovered');");
     // refresh 在途期间持有权可能已被别的实例夺走(teardown 已停 client):connectNow
     // 会把已停的 client 拉活绕过仲裁,重连前必须重新确认 isOwner。
     expect(recoverBody).toContain('arbiter?.isOwner()');
+    expect(recoverBody).toContain('client === recoveryClient');
+    expect(recoverBody).toContain('activeOwnerScopeKey() === recoveryScope');
 
     // teardown 必须清掉延迟自救 timer,避免登出/掉持有权后迟到触发。
     const teardownStart = deviceLinkSource.indexOf('function teardownActiveLink(): void {');
@@ -165,7 +167,7 @@ describe('desktop auth session-expiry detection', () => {
   });
 
   it('routes replacement refresh through the durable Ghost projection owner boundary', () => {
-    const refreshStart = authSource.indexOf('export async function refresh(): Promise<boolean> {');
+    const refreshStart = authSource.indexOf('export async function refresh(');
     const refreshEnd = authSource.indexOf('\n}\n\nexport async function logout()', refreshStart);
     const refreshBody = authSource.slice(refreshStart, refreshEnd);
 

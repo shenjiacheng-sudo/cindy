@@ -107,6 +107,28 @@ describe('companion profile uploader', () => {
     expect(t.rows.get('companion.memory.v1:a.md')?.value).toEqual({ filename: 'a.md', content: 'new home' });
   });
 
+  it('leaves a part that could not be read untouched in the cloud, and refuses a hand-over', async () => {
+    const t = setup();
+    const routine = { key: 'companion.routine.v1:r1', value: { id: 'r1' } };
+    t.setValues([profile('soul'), routine]);
+    await t.uploader.syncBot('bot', 'actor');
+    // The routine engine is not ready this time: the profile still goes up, the routine is not tombstoned.
+    t.setValues([profile('soul v2'), { key: 'companion.routine.v1:', value: null, unread: true }]);
+    await t.uploader.syncBot('bot', 'actor');
+    expect(t.writes().map(w => [w.key, w.value === null])).toEqual([
+      ['companion.profile.v1', false], ['companion.routine.v1:r1', false], ['companion.profile.v1', false]]);
+    await expect(t.uploader.syncBot('bot', 'actor', Number.POSITIVE_INFINITY, { requireAll: true })).rejects.toThrow('COMPANION_READ_INCOMPLETE');
+  });
+
+  it('clears a todo that left the travelling window from the cloud', async () => {
+    const t = setup();
+    t.setValues([profile('soul'), { key: 'companion.todo.v1:todo:1', value: { id: 'todo:1' } }]);
+    await t.uploader.syncBot('bot', 'actor');
+    t.setValues([profile('soul')]);
+    await t.uploader.syncBot('bot', 'actor');
+    expect(t.writes().filter(w => w.key === 'companion.todo.v1:todo:1').map(w => w.value)).toEqual([{ id: 'todo:1' }, null]);
+  });
+
   it('spreads a large first upload over cycles', async () => {
     const t = setup();
     t.setValues(Array.from({ length: 45 }, (_, i) => memory(`m${i}.md`, `v${i}`)));
@@ -130,6 +152,23 @@ describe('companion profile uploader', () => {
     const uploader = createCompanionUploader({ api, state: memoryState().state, readValues: async () => [profile('s')], log });
     await uploader.syncAll([{ botId: 'bot', actorId: 'actor' }]);
     expect(log.warn).toHaveBeenCalledWith('Companion upload will retry', { actorId: 'actor', code: 'UNAVAILABLE' });
+  });
+
+  it('uploads the capability setup like any value: once, on change, with a hand-over waiting for it too', async () => {
+    const t = setup();
+    const caps = (memory: boolean): CompanionPreferenceValue => ({ key: 'companion.capabilities.v1', value: { skills: ['a'], memory } });
+    t.setValues([profile('soul'), caps(true)]);
+    await t.uploader.syncBot('bot', 'actor', undefined, { requireAll: true });
+    await t.uploader.syncBot('bot', 'actor');
+    expect(t.writes().filter(w => w.key === 'companion.capabilities.v1').map(w => w.value)).toEqual([{ skills: ['a'], memory: true }]);
+    t.setValues([profile('soul'), caps(false)]);
+    await t.uploader.syncBot('bot', 'actor');
+    expect(t.writes().filter(w => w.key === 'companion.capabilities.v1')).toHaveLength(2);
+    // A record that could not be read keeps the cloud value; a hand-over refuses to go without it.
+    t.setValues([profile('soul'), { key: 'companion.capabilities.v1', value: null, unread: true }]);
+    await t.uploader.syncBot('bot', 'actor');
+    expect(t.writes().filter(w => w.key === 'companion.capabilities.v1')).toHaveLength(2);
+    await expect(t.uploader.syncBot('bot', 'actor', undefined, { requireAll: true })).rejects.toThrow('COMPANION_READ_INCOMPLETE');
   });
 
   it('serialises JSON with sorted keys', () => {

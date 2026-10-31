@@ -29,6 +29,13 @@ export interface ExecutorWorkspaceRoots {
   aliases?: readonly ExecutorPathAlias[];
 }
 
+/** 单条返回结果共用的路径视图；不用于文件访问授权。 */
+export interface ExecutorAgentProjection {
+  toAgentPath(input: string): string;
+  mapTextForAgent(text: string, context?: PathTextContext): string;
+  mapOutputForAgent(data: Buffer): Buffer;
+}
+
 export class ExecutorPathError extends Error {
   constructor(message: string) {
     super(message);
@@ -61,6 +68,36 @@ export function realPathOrAncestor(target: string): string {
 /** Windows 的 native realpath 可能返回长路径，而 Node 的普通实现保留短路径写法；两者都要覆盖。 */
 function realPathOrAncestorPortable(target: string): string {
   return realPathOrAncestorWith(target, fs.realpathSync);
+}
+
+/** realpath 的磁盘访问交给 Node 文件系统线程池，不能在输出热路径阻塞 Electron。 */
+async function realPathOrAncestorAsync(
+  target: string, resolveRealpath: (target: string) => Promise<string> = fs.promises.realpath,
+): Promise<string> {
+  let current = path.resolve(target);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      const real = await resolveRealpath(current);
+      return rest.length ? path.join(real, ...rest.reverse()) : real;
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(target);
+      rest.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function portableRealpathAsync(target: string): Promise<string> {
+  return new Promise((resolve, reject) => fs.realpath(target, (error, real) => error ? reject(error) : resolve(real)));
+}
+
+function projectUtf8Output(data: Buffer, project: (text: string) => string): Buffer {
+  const text = data.toString('utf8');
+  if (data.includes(0) || !Buffer.from(text, 'utf8').equals(data)) return data;
+  const projected = project(text);
+  return projected === text ? data : Buffer.from(projected, 'utf8');
 }
 
 function isInside(child: string, parent: string): boolean {
@@ -107,14 +144,35 @@ interface AliasPrefixes<T extends ExecutorPathAlias> {
   prefixes: Array<{ alias: T; pattern: RegExp }>;
 }
 
-/** 别名需已按 from 由长到短排好；Windows 路径不区分大小写，其余按原样比较。 */
-function aliasPrefixes<T extends ExecutorPathAlias>(aliases: readonly T[]): AliasPrefixes<T> {
-  const prefixes = aliases.map((alias) => ({
-    alias,
-    pattern: new RegExp(alias.from.replace(/[\\/]+$/, '').split(/[\\/]/)
-      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[/\\\\]'), WINDOWS_PATH.test(alias.from) ? 'iy' : 'y'),
-  }));
+/**
+ * 别名需已按 from 由长到短排好；Windows 路径不区分大小写，其余按原样比较。
+ * 分隔符按路径写法认：Mac / Linux 路径只认 `/`(`C:\Users\x` 里的 `\Users` 不是 `/Users`)；Windows 路径认
+ * `\` 与 `/`。escapedSeparators 时 Windows 路径还认转义成两个的 `\\`(Windows 上的 Agent 按 bash / 源码
+ * 字符串的写法写 `"C:\\Users\\x"`，它表示的仍是同一个路径)。
+ */
+function aliasPrefixes<T extends ExecutorPathAlias>(
+  aliases: readonly T[], { escapedSeparators = false }: { escapedSeparators?: boolean } = {},
+): AliasPrefixes<T> {
+  const prefixes = aliases.map((alias) => {
+    const windows = WINDOWS_PATH.test(alias.from);
+    const separator = !windows ? '/' : escapedSeparators ? String.raw`(?:\\\\|[/\\])` : String.raw`[/\\]`;
+    return {
+      alias,
+      pattern: new RegExp(alias.from.replace(/[\\/]+$/, '').split(/[\\/]/)
+        .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join(separator), windows ? 'iy' : 'y'),
+    };
+  });
   return { finder: new RegExp(prefixes.map((item) => item.pattern.source).join('|'), 'gi'), prefixes };
+}
+
+/** Mac / Linux 路径前面紧挨着盘符(`C:/Users`)时，它是 Windows 路径的一部分。 */
+function followsDriveLetter(text: string, index: number): boolean {
+  return /(?:^|[^A-Za-z0-9_])[A-Za-z]:$/.test(text.slice(Math.max(0, index - 3), index));
+}
+
+/** 路径里第一个分隔符的写法：`\\`(转义)、`\` 或 `/`。 */
+function separatorToken(value: string): string | undefined {
+  return /\\\\|[\\/]/.exec(value)?.[0];
 }
 
 /** 从 start 起找下一个完整的目录前缀；同一位置先试最长的别名，不成立再试它的上级。 */
@@ -130,6 +188,7 @@ function nextAliasPrefix<T extends ExecutorPathAlias>(
     const index = found.index;
     if (index === 0 || !/[A-Za-z0-9_]/.test(text[index - 1])) {
       for (const { alias, pattern } of prefixes) {
+        if (!WINDOWS_PATH.test(alias.from) && followsDriveLetter(text, index)) continue;
         pattern.lastIndex = index;
         const hit = pattern.exec(text);
         if (!hit) continue;
@@ -154,14 +213,18 @@ const PATH_SUFFIX = /[/\\][^\s\x60'";:|&)<>}\]*?$%]*/y;
  */
 export type SeparatorStyle = 'target' | 'source';
 
-function joinMapped(to: string, matched: string, suffix: string, style: SeparatorStyle): string {
+function joinMapped(to: string, matched: string, suffix: string, style: SeparatorStyle, escapedSeparators = false): string {
   const base = to.replace(/[\\/]+$/, '');
+  // 只在认转义写法的方向(Agent 写回本机)：Agent 写的是转义的 `\\` 时，后缀里的 `\\` 是一个分隔符，
+  // 目标端仍用反斜杠时保持转义写法。网络共享路径开头的 `\\server` 不是转义。
+  const escaped = escapedSeparators && separatorToken(matched.replace(/^[\\/]{2}(?=[^\\/])/, '')) === '\\\\';
+  const suffixSeparators = escaped ? /\\\\|[\\/]/g : /[\\/]/g;
   if (style === 'source' && WINDOWS_PATH.test(base)) {
-    const separator = /[\\/]/.exec(matched)?.[0] ?? '\\';
-    return base.replace(/[\\/]/g, separator) + suffix.replace(/[\\/]/g, separator);
+    const separator = escaped ? '\\\\' : /[\\/]/.exec(matched)?.[0] ?? '\\';
+    return base.replace(/[\\/]/g, separator) + suffix.replace(suffixSeparators, separator);
   }
-  const separator = to.includes('\\') ? '\\' : '/';
-  return base + suffix.replace(/[\\/]/g, separator);
+  const separator = to.includes('\\') ? (escaped ? '\\\\' : '\\') : '/';
+  return (escaped && separator === '\\\\' ? base.replace(/\\/g, separator) : base) + suffix.replace(suffixSeparators, separator);
 }
 
 /** 记录 / 还原路径的原写法：text 为正文 token，decoded 为 JSON 字符串里的值，json 为 JSON 字符串字面量。 */
@@ -181,6 +244,8 @@ export interface ProjectPathTextOptions {
   json?: boolean;
   /** 目录名后接空白或标点时，核对它是否其实是同级目录名的一部分。 */
   continuesName?: (alias: ExecutorPathAlias, rest: string) => boolean;
+  /** Agent 写回本机的方向：Windows 虚拟路径也认转义的 `\\` 分隔符(见 aliasPrefixes)。 */
+  escapedSeparators?: boolean;
   spellings?: PathSpellingHooks;
   /** 原始正文中的位置，不包含 JSON 解码后的临时字符串。 */
   restoreOriginal?(offset: number, input: string): string | undefined;
@@ -244,15 +309,33 @@ export function mapJsonPathText(
   });
 }
 
+interface ProjectionPlan { size: number; entries: ExecutorPathAlias[]; prefixes?: AliasPrefixes<ExecutorPathAlias> }
+
+/**
+ * 别名排序和前缀正则只与别名数组有关，按数组引用缓存(#7710)：每段输出、每个流式 delta 都要投影，
+ * 别名几百条时逐次重建会占满主线程。数组必须整体替换，不得原地修改；长度变了也视为失效。
+ */
+const projectionPlans = new WeakMap<readonly ExecutorPathAlias[], Map<boolean, ProjectionPlan>>();
+
+function projectionPlan(aliases: readonly ExecutorPathAlias[], escapedSeparators: boolean): ProjectionPlan {
+  let byEscape = projectionPlans.get(aliases);
+  if (!byEscape) projectionPlans.set(aliases, byEscape = new Map());
+  const cached = byEscape.get(escapedSeparators);
+  if (cached?.size === aliases.length) return cached;
+  const entries = aliases.filter((alias) => alias.from.replace(/[\\/]+$/, '').length > 2)
+    .sort((a, b) => b.from.length - a.from.length);
+  const plan: ProjectionPlan = { size: aliases.length, entries, prefixes: entries.length ? aliasPrefixes(entries, { escapedSeparators }) : undefined };
+  byEscape.set(escapedSeparators, plan);
+  return plan;
+}
+
 /** 对已知目录做单次双向投影，最长前缀先匹配，防止替换结果再次被短祖先别名改写。 */
 export function projectPathText(
   text: string, aliases: readonly ExecutorPathAlias[], context: PathTextContext = 'text',
   isCompletePath?: (mapped: string) => boolean, options: ProjectPathTextOptions = {},
 ): string {
-  const entries = aliases.filter((alias) => alias.from.replace(/[\\/]+$/, '').length > 2)
-    .sort((a, b) => b.from.length - a.from.length);
-  if (!entries.length) return text;
-  const prefixes = aliasPrefixes(entries);
+  const { entries, prefixes } = projectionPlan(aliases, options.escapedSeparators ?? false);
+  if (!prefixes) return text;
   const { spellings } = options;
   // 同一个路径在 JSON 字符串里和正文里的转义不同，原写法按所处层级分别记录与还原。
   let depth = 0;
@@ -297,7 +380,7 @@ export function projectPathText(
       for (const alias of entries) {
         if (stripAliasPrefix(pathValue, alias.from) === null) continue;
         const suffix = pathValue.slice(alias.from.replace(/[\\/]+$/, '').length);
-        const mapped = joinMapped(alias.to, pathValue, suffix, options.wholeSeparators ?? 'target');
+        const mapped = joinMapped(alias.to, pathValue, suffix, options.wholeSeparators ?? 'target', options.escapedSeparators);
         // 明确的路径字段可整体映射；歧义字段(如 script)只有现存完整路径才整体映射，
         // 否则按正文逐 token 投影，避免把脚本源码里的 /api/v1 等内容当成路径。
         if (valueContext === 'path' || isCompletePath?.(mapped)) return replace(pathValue, () => mapped, offset) + lineEnd;
@@ -312,7 +395,7 @@ export function projectPathText(
       const suffix = PATH_SUFFIX.exec(value)?.[0] ?? '';
       const input = value.slice(hit.index, hit.end + suffix.length);
       const { to } = hit.alias;
-      result += value.slice(position, hit.index) + replace(input, () => joinMapped(to, input, suffix, options.separators ?? 'target'), offset === null ? null : offset + hit.index);
+      result += value.slice(position, hit.index) + replace(input, () => joinMapped(to, input, suffix, options.separators ?? 'target', options.escapedSeparators), offset === null ? null : offset + hit.index);
       position = hit.end + suffix.length;
     }
     return result + value.slice(position);
@@ -477,11 +560,15 @@ export class PathSpellings {
   }
 }
 
+const NO_PREFIXES: readonly string[] = [];
+
 export class ExecutorWorkspace {
   readonly workingDir: string;
   private roots: string[];
   private extraDirs: string[];
   private aliases: ExecutorPathAlias[];
+  /** 由 this.aliases 派生的数组，按它的引用缓存；别名整体替换后自然失效(#7710)。 */
+  private derived?: { aliases: ExecutorPathAlias[]; toLocal?: ExecutorPathAlias[]; prefixes?: readonly string[]; toAgent?: ExecutorPathAlias[] };
   private virtualRoot?: string;
 
   constructor(roots: ExecutorWorkspaceRoots) {
@@ -505,6 +592,10 @@ export class ExecutorWorkspace {
         if (path.resolve(canonical) !== path.resolve(alias.to)) expanded.push({ from: alias.from, to: canonical });
       }
     }
+    this.installAliases(expanded);
+  }
+
+  private installAliases(expanded: readonly ExecutorPathAlias[]): void {
     const seen = new Set<string>();
     this.aliases = expanded
       .filter((alias) => {
@@ -514,6 +605,14 @@ export class ExecutorWorkspace {
         return true;
       })
       .sort((a, b) => b.from.length - a.from.length);
+  }
+
+  /**
+   * 连回同一个会话时补进对方新给的映射。已有的保持原来的目标、排在同长度的新映射前面：对话里出现过的
+   * 虚拟路径(含运行中分配的 runtime-*)接回后仍指向同一个本机目录，不会被换成别的目录。
+   */
+  addAliases(aliases: readonly ExecutorPathAlias[]): void {
+    this.setAliases([...this.aliases, ...aliases]);
   }
 
   /**
@@ -552,6 +651,22 @@ export class ExecutorWorkspace {
     });
   }
 
+  /** exec-server 初始化返回的目录也异步解析；等待期间新增的别名不能被旧快照覆盖。 */
+  async virtualizeDirsAsync(dirs: readonly string[]): Promise<void> {
+    if (!this.virtualRoot) return;
+    const native = /^[A-Za-z]:|^\\\\/.test(this.virtualRoot) ? path.win32 : path.posix;
+    for (const dir of dirs) {
+      const real = this.resolve(dir);
+      if (this.aliases.some((alias) => path.resolve(alias.to) === real)) continue;
+      const canonical = await Promise.all([
+        realPathOrAncestorAsync(real), realPathOrAncestorAsync(real, portableRealpathAsync),
+      ]);
+      if (this.aliases.some((alias) => path.resolve(alias.to) === real)) continue;
+      const from = native.join(this.virtualRoot, 'additional', 'runtime-' + this.aliases.length);
+      this.installAliases([...this.aliases, ...[real, ...canonical].map((to) => ({ from, to }))]);
+    }
+  }
+
   /** 任务运行中附加目录变化时更新。 */
   setExtraDirs(extraDirs: readonly string[]): void {
     this.extraDirs = extraDirs.filter((dir) => path.isAbsolute(dir)).map((dir) => path.resolve(dir));
@@ -565,17 +680,45 @@ export class ExecutorWorkspace {
 
   /** 影子路径映射回本机路径；不是影子路径时原样返回。 */
   mapAlias(input: string): string {
-    for (const alias of this.aliases) {
+    return this.localPathFromAgent(input) ?? input;
+  }
+
+  /** 影子路径对应的本机路径；不是影子路径(Agent 主机自己的路径)时返回 null。 */
+  localPathFromAgent(input: string, aliases: readonly ExecutorPathAlias[] = this.aliases): string | null {
+    for (const alias of aliases) {
       const rest = stripAliasPrefix(input, alias.from);
       if (rest !== null) return rest ? path.join(alias.to, ...rest.split('/')) : alias.to;
     }
-    return input;
+    return null;
+  }
+
+  /**
+   * Agent 给的绝对 glob：影子前缀换成本机目录，目录名按字面匹配——通配字符写成字符类(`[` → `[[]`，
+   * 两种路径约定都认)，POSIX 本机目录名里合法的反斜杠写成 `\\`(Codex 在 POSIX 约定下把它当转义符)；
+   * 前缀后面的模式保持 Agent 的写法，POSIX 模式里的反斜杠转义不当成分隔符。
+   */
+  localGlobFromAgent(pattern: string): string | null {
+    const windows = process.platform === 'win32';
+    for (const alias of this.aliases) {
+      if (stripAliasPrefix(pattern, alias.from) === null) continue;
+      const from = alias.from.replace(/[\\/]+$/, '');
+      const rest = pattern.slice(from.length).replace(/^[\\/]/, '');
+      const local = alias.to.replace(windows ? /[\\/]+$/ : /\/+$/, '');
+      const base = (windows ? local : local.replace(/\\/g, '\\\\')).replace(/[*?[\]{}]/g, (char) => `[${char}]`);
+      if (!rest) return base;
+      return `${base}/${WINDOWS_PATH.test(from) ? rest.replace(/\\/g, '/') : rest}`;
+    }
+    return null;
   }
 
   /** 本机真实路径投影到 Agent 主机上的路径；仅匹配完整路径段。 */
   toAgentPath(input: string): string {
     if (!this.virtualRoot) return input;
-    const aliases = [...this.aliases].sort((a, b) => b.to.length - a.to.length);
+    return this.pathToAgent(input, this.aliases);
+  }
+
+  private pathToAgent(input: string, pathAliases: readonly ExecutorPathAlias[]): string {
+    const aliases = [...pathAliases].sort((a, b) => b.to.length - a.to.length);
     for (const alias of aliases) {
       const rest = stripAliasPrefix(input, alias.to);
       if (rest === null) continue;
@@ -596,14 +739,54 @@ export class ExecutorWorkspace {
       { ...options, continuesName: this.continuesName });
   }
 
+  /** 每条结果刷新一次 canonical 目录；同一结果的所有字段复用，后续结果仍能看到 junction 的变化。 */
+  async prepareAgentProjection(): Promise<ExecutorAgentProjection> {
+    if (!this.virtualRoot) return { toAgentPath: (text) => text, mapTextForAgent: (text) => text, mapOutputForAgent: (data) => data };
+    const aliases = this.aliases;
+    const targets = [...new Set(aliases.map((alias) => alias.to))];
+    const canonical = new Map(await Promise.all(targets.map(async (target) => {
+      const paths = [realPathOrAncestorAsync(target)];
+      // Windows native realpath expands 8.3 names, while process output can retain
+      // them. Refresh both spellings when a junction changes its target.
+      if (process.platform === 'win32') paths.push(realPathOrAncestorAsync(target, portableRealpathAsync));
+      return [target, await Promise.all(paths)] as const;
+    })));
+    const projectedAliases = this.agentAliases(aliases, canonical);
+    const pathAliases = aliases.flatMap((alias) => [alias, ...canonical.get(alias.to)!.map((to) => ({ from: alias.from, to }))]);
+    const project = (text: string, context: PathTextContext = 'text') =>
+      projectPathText(text, projectedAliases, context, (mapped) => fs.existsSync(this.localPathFromAgent(mapped, aliases) ?? mapped),
+        { continuesName: this.continuesName });
+    return {
+      toAgentPath: (input) => this.pathToAgent(input, pathAliases),
+      mapTextForAgent: project,
+      mapOutputForAgent: (data) => projectUtf8Output(data, project),
+    };
+  }
+
   /** 本机真实路径(含 Git Bash 写法)→ Agent 看到的虚拟路径。 */
-  private agentAliases(): ExecutorPathAlias[] {
+  private agentAliases(aliases: readonly ExecutorPathAlias[] = this.aliases, canonical?: ReadonlyMap<string, readonly string[]>): ExecutorPathAlias[] {
+    if (canonical || aliases !== this.aliases) return this.buildAgentAliases(aliases, canonical);
+    // 每次都同步 realpath 全部别名会随输出条数相乘；同一个事件循环批次内复用，下一批重新解析(junction 变化仍可见)。
+    const derived = this.derivedAliases();
+    if (!derived.toAgent) {
+      derived.toAgent = this.buildAgentAliases(aliases, canonical);
+      setImmediate(() => { derived.toAgent = undefined; });
+    }
+    return derived.toAgent;
+  }
+
+  private derivedAliases(): NonNullable<ExecutorWorkspace['derived']> {
+    if (this.derived?.aliases !== this.aliases) this.derived = { aliases: this.aliases };
+    return this.derived;
+  }
+
+  private buildAgentAliases(aliases: readonly ExecutorPathAlias[], canonical?: ReadonlyMap<string, readonly string[]>): ExecutorPathAlias[] {
     const seen = new Set<string>();
-    return this.aliases.flatMap((alias) => {
+    return aliases.flatMap((alias) => {
       // A junction/symlink can be resolved differently by the Windows runner and by
       // the process that created the alias. Include the current canonical target at
       // projection time so both spellings still map to the same virtual directory.
-      const targets = [alias.to, realPathOrAncestor(alias.to)];
+      const targets = [alias.to, ...(canonical ? canonical.get(alias.to)! : [realPathOrAncestor(alias.to)])];
       return targets.flatMap((target) => {
         const real = target.replace(/\\/g, '/');
         const entries: ExecutorPathAlias[] = [{ from: real, to: alias.from }];
@@ -651,7 +834,8 @@ export class ExecutorWorkspace {
   };
 
   private agentPathsToLocal(): ExecutorPathAlias[] {
-    return this.aliases.map((alias) => ({ from: alias.from.replace(/\\/g, '/'), to: alias.to }));
+    const derived = this.derivedAliases();
+    return derived.toLocal ??= this.aliases.map((alias) => ({ from: alias.from.replace(/\\/g, '/'), to: alias.to }));
   }
 
   /**
@@ -668,7 +852,9 @@ export class ExecutorWorkspace {
 
   mapTextFromAgent(text: string, context: PathTextContext = 'text'): string {
     if (!this.virtualRoot) return text;
-    return projectPathText(text, this.agentPathsToLocal(), context, (mapped) => fs.existsSync(mapped), { separators: 'source', continuesName: this.localContinuesName });
+    return projectPathText(text, this.agentPathsToLocal(), context, (mapped) => fs.existsSync(mapped), {
+      separators: 'source', continuesName: this.localContinuesName, escapedSeparators: true,
+    });
   }
 
   /** 正文里的单个完整路径(代码段、尖括号链接)：还原成本机路径，分隔符沿用 Agent 的写法。 */
@@ -751,6 +937,7 @@ export class ExecutorWorkspace {
   private contentFromAgent(text: string, spellings?: PathSpellings, options: ProjectPathTextOptions = {}, pass?: 'A' | 'B' | 'unique'): string {
     return projectPathText(text, this.agentPathsToLocal(), 'text', (mapped) => fs.existsSync(mapped), {
       ...options, separators: 'source', wholeSeparators: 'source', spellings: spellings?.restorer(pass), continuesName: this.localContinuesName,
+      escapedSeparators: true,
     });
   }
 
@@ -778,15 +965,14 @@ export class ExecutorWorkspace {
 
   /** 展示层延迟尚未传完整的虚拟路径；别名仍由当前执行器维护。 */
   agentPathPrefixes(): readonly string[] {
-    return this.virtualRoot ? this.aliases.map((alias) => alias.from) : [];
+    if (!this.virtualRoot) return NO_PREFIXES;
+    const derived = this.derivedAliases();
+    return derived.prefixes ??= this.aliases.map((alias) => alias.from);
   }
 
   mapOutputForAgent(data: Buffer): Buffer {
-    const text = data.toString('utf8');
     // 二进制 stdout 不做 UTF-8 往返，避免 exec.run / process/output 改变原始字节。
-    if (data.includes(0) || !Buffer.from(text, 'utf8').equals(data)) return data;
-    const projected = this.mapTextForAgent(text);
-    return projected === text ? data : Buffer.from(projected, 'utf8');
+    return projectUtf8Output(data, (text) => this.mapTextForAgent(text));
   }
 
   /** Agent 写入的文件字节；original 为写入前的文本内容(见 mapContentFromAgent)。 */
@@ -807,7 +993,7 @@ export class ExecutorWorkspace {
     if (!aliases.length) return command;
     // 路径尾部遇到引号即止：闭合引号属于外层 shell 语法，吞进路径会被按引号上下文转义
     // ('…mjs' → '…mjs'\'')，留下未闭合的引号。
-    const prefixes = aliasPrefixes(aliases);
+    const prefixes = aliasPrefixes(aliases, { escapedSeparators: true });
     const commandContext = (input: string, end: number): { quote: 'none' | 'single' | 'double'; wordStart: number } => {
       let quote: 'none' | 'single' | 'double' = 'none';
       let wordStart = 0;
@@ -878,6 +1064,15 @@ export class ExecutorWorkspace {
         for (; suffixEnd < command.length; suffixEnd += 1) {
           const char = command[suffixEnd];
           if (char === '\r' || char === '\n') break;
+          // bash 里 `\\` 表示一个反斜杠：Windows 路径中后面紧跟目录名时，它就是一个分隔符。
+          // 后面是引号、变量、换行等时仍按转义处理，交给下面的判断原样保留。
+          const named = command[suffixEnd + 2];
+          if (dialect === 'bash' && windowsPath && char === '\\' && command[suffixEnd + 1] === '\\'
+            && named !== undefined && !/[\\/"'$\x60\r\n]/.test(named)
+            && (context !== 'none' || !/[\s;|&()<>]/.test(named))) {
+            suffixEnd += 1;
+            continue;
+          }
           if (context === 'single' && char === "'") break;
           if (context === 'double' && char === '"') break;
           if (pathList && char === listSeparator) break;
@@ -888,8 +1083,10 @@ export class ExecutorWorkspace {
           if (dialect === 'cmd' && /[%^!]/.test(char)) break;
         }
       }
+      // 上面只把后接目录名的 `\\` 收进后缀，所以后缀里的 `\\` 都是一个分隔符。
+      const suffixSeparators = windowsPath && dialect === 'bash' ? /\\\\|[\\/]/g : /[\\/]/g;
       result += command.slice(end, start) + quote(alias.to.replace(/[\\/]+$/, ''), context)
-        + command.slice(suffixStart, suffixEnd).replace(/[\\/]/g, separator);
+        + command.slice(suffixStart, suffixEnd).replace(suffixSeparators, separator);
       end = suffixEnd;
     }
     return result + command.slice(end);
